@@ -10,7 +10,7 @@ QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::freeQueue = nullptr;
 uint16_t *AppLogic::decode_buf = nullptr;
 
-size_t find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result) {
+size_t AppLogic::find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result) {
   uint32_t test;
   for (size_t i = 0; i < len - 4; i += 4) {
     test = ~(buf[i] | buf[i + 1] << 8 | buf[i + 2] << 16 | buf[i + 3] << 24);
@@ -140,23 +140,23 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
 
           int r = stream->read(&buf[f_pos], to_read);
           if (r > 0) {
-            // size_t p = find_FF_pos(&buf[f_pos], r, &found);
-            // if (found && buf[p + 1] == 0xD9) {
-            //   f_pos = r - p;
-            //   eoi = true;
-            //   break;
-            // } 
-            // f_pos += r;
-            for (int i = 0; i < r; i++) {
-              if (last_byte == 0xFF && buf[f_pos + i] == 0xD9) {
-                f_pos += (i + 1);
-                eoi = true;
-                break;
-              }
-              last_byte = buf[f_pos + i];
-            }
-            if (!eoi)
-              f_pos += r;
+            size_t p = find_FF_pos(&buf[f_pos], 0xD9u, r, &found);
+            if (found) {
+              f_pos += r - p + 1;
+              eoi = true;
+              break;
+            } 
+            f_pos += r;
+            // for (int i = 0; i < r; i++) {
+            //   if (last_byte == 0xFF && buf[f_pos + i] == 0xD9) {
+            //     f_pos += (i + 1);
+            //     eoi = true;
+            //     break;
+            //   }
+            //   last_byte = buf[f_pos + i];
+            // }
+            // if (!eoi)
+            //   f_pos += r;
           }
         }
 

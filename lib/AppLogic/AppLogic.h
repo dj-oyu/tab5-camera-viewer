@@ -14,6 +14,7 @@ public:
   static void update();
 
 private:
+  static size_t find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result);
   static void initWiFi();
   static void mjpegFetchTask(void *pvParameters);
   static void mjpegRenderTask(void *pvParameters);
