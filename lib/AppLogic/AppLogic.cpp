@@ -95,7 +95,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         }
 
         size_t f_pos = 0;
-        bool soi = false;
+        bool soi = false, found = false;
 
         // 1. Search for SOI (0xFF 0xD8)
         while (stream->connected() && !soi) {
@@ -108,14 +108,12 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           // Read into temporary location to search
           int r = stream->read(buf, 4096);
           if (r > 0) {
-            for (int i = 0; i < r - 1; i++) {
-              if (buf[i] == 0xFF && buf[i + 1] == 0xD8) {
-                size_t remain = r - i;
-                memmove(buf, &buf[i], remain);
-                f_pos = remain;
-                soi = true;
-                break;
-              }
+            size_t p = find_FF_pos(buf, r, &found);
+            if (found && buf[p + 1] == 0xD8) {
+              memmove(buf, &buf[p], r - p);
+              f_pos = r - p;
+              soi = true;
+              break;
             }
           }
         }
@@ -138,6 +136,13 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
 
           int r = stream->read(&buf[f_pos], to_read);
           if (r > 0) {
+            // size_t p = find_FF_pos(&buf[f_pos], r, &found);
+            // if (found && buf[p + 1] == 0xD9) {
+            //   f_pos = r - p;
+            //   eoi = true;
+            //   break;
+            // } 
+            // f_pos += r;
             for (int i = 0; i < r; i++) {
               if (last_byte == 0xFF && buf[f_pos + i] == 0xD9) {
                 f_pos += (i + 1);
