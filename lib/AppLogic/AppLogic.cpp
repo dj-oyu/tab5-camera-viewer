@@ -10,14 +10,26 @@ QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::freeQueue = nullptr;
 uint16_t *AppLogic::decode_buf = nullptr;
 
-size_t find_FF_pos(uint8_t *buf, size_t len, bool *result) {
-  for (int i = 0; i < len - 3; i += 4) {
-    uint32_t test = ~(buf[i] | buf[i + 1] << 8 | buf[i + 2] << 16 | buf[i + 3] << 24);
+size_t find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result) {
+  uint32_t test;
+  for (size_t i = 0; i < len - 4; i += 4) {
+    test = ~(buf[i] | buf[i + 1] << 8 | buf[i + 2] << 16 | buf[i + 3] << 24);
     if ((test - 0x01010101u & ~test & 0x80808080u) == 0)
       continue;
-    while(buf[i] != 0xFFu) i++;
-    *result = true;
-    return i;
+    for (size_t j = 0; j < 4; j++) {
+      if(buf[i + j] == 0xFFu && buf[i + j + 1] == adjacent) {
+        *result = true;
+        return i + j;
+      }
+    }
+    for (size_t i = len / 4 * 4; i < len; i++) {
+      if(buf[i] == 0xFFu && buf[i + 1] == adjacent) {
+        *result = true;
+        return i;
+      }
+    }
+    *result = false;
+    return 0;
   }
 
   int i = len / 4 * 4;
