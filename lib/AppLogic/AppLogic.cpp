@@ -133,6 +133,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 2. Direct Bulk Read until EOI (0xFF 0xD9)
         bool eoi = false;
         const size_t MAX_F = 511 * 1024;
+        uint8_t *prev = nullptr;
 
         while (stream->connected() && soi && !eoi && start < buf + MAX_F) {
           int avail = stream->available();
@@ -147,12 +148,18 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
 
           int r = stream->read(start, to_read);
           if (r > 0) {
-            bool found = find_FF_pos(start, 0xD9u, r, &start);
+            if (prev && *prev == 0xFFu && *start == 0xD9u) {
+              found = true;
+            } else {
+              found = find_FF_pos(start, 0xD9u, r, &prev);
+            }
+            
             if (found) {
-              start += 2;
+              start = prev + 2;
               eoi = true;
               break;
             }
+            prev = start + r - 1;
             start += r;
           }
         }
@@ -161,7 +168,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           memset(start, 0,
                  min((size_t)512, (size_t)(buf + 512 * 1024 - start)));
           esp_cache_msync(buf, 512 * 1024, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-          FrameData fd = {buf, (size_t)(start - buf)};
+          FrameData fd = {buf, (size_t)(start - buf) + 2};
           xQueueSend(frameQueue, &fd, 0);
         } else {
           xQueueSend(freeQueue, &buf, 0);
@@ -206,11 +213,11 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         look_ahead_len = 512 * 1024;
 
       if (jpeg_decoder_process(
-              decoder, &dec_cfg, fd.buf, look_ahead_len, (uint8_t *)decode_buf,
+              decoder, &dec_cfg, fd.buf, fd.len, (uint8_t *)decode_buf,
               STREAM_WIDTH * STREAM_HEIGHT * 2, &out_size) == ESP_OK) {
         // uint32_t t2 = millis();
 
-        esp_cache_msync(decode_buf, STREAM_WIDTH * STREAM_HEIGHT * 2,
+        esp_cache_msync(decode_buf, out_size,
           ESP_CACHE_MSYNC_FLAG_DIR_M2C |
           ESP_CACHE_MSYNC_FLAG_INVALIDATE);
           
@@ -221,9 +228,9 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
                  &src[y * STREAM_WIDTH], STREAM_WIDTH * 2);
         }
 
-        esp_cache_msync(fb, STREAM_HEIGHT * stride * 2,
-                        ESP_CACHE_MSYNC_FLAG_DIR_C2M |
-                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        // esp_cache_msync(fb, STREAM_HEIGHT * stride * 2,
+        //                 ESP_CACHE_MSYNC_FLAG_DIR_C2M |
+        //                     ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         // uint32_t t3 = millis();
 
         // frames++;
