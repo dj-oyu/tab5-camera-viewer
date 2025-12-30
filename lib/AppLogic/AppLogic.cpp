@@ -22,24 +22,16 @@ size_t find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result) {
         return i + j;
       }
     }
-    for (size_t i = len / 4 * 4; i < len; i++) {
-      if(buf[i] == 0xFFu && buf[i + 1] == adjacent) {
-        *result = true;
-        return i;
-      }
-    }
-    *result = false;
-    return 0;
   }
 
-  int i = len / 4 * 4;
-  while(buf[i] != 0xFFu && i < len) i++;
-  if(i == len) {
-    *result = false;
-    return 0;
+  for (size_t i = len / 4 * 4; i < len; i++) {
+    if(buf[i] == 0xFFu && buf[i + 1] == adjacent) {
+      *result = true;
+      return i;
+    }
   }
-  *result = true;
-  return i;
+  *result = false;
+  return 0;
 }
 
 void AppLogic::begin() {
@@ -120,8 +112,8 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           // Read into temporary location to search
           int r = stream->read(buf, 4096);
           if (r > 0) {
-            size_t p = find_FF_pos(buf, r, &found);
-            if (found && buf[p + 1] == 0xD8) {
+            size_t p = find_FF_pos(buf, 0xD8u, r, &found);
+            if (found) {
               memmove(buf, &buf[p], r - p);
               f_pos = r - p;
               soi = true;
