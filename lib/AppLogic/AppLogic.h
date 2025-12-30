@@ -2,6 +2,7 @@
 #define APPLOGIC_H
 
 #include <M5Unified.h>
+#include <cstdint>
 #include <driver/jpeg_decode.h>
 #include <esp_cache.h>
 #include <freertos/FreeRTOS.h>
@@ -14,7 +15,7 @@ public:
   static void update();
 
 private:
-  static size_t find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result);
+  static bool find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, uint8_t **pos);
   static void initWiFi();
   static void mjpegFetchTask(void *pvParameters);
   static void mjpegRenderTask(void *pvParameters);
@@ -30,6 +31,8 @@ private:
 
   static const uint32_t STREAM_WIDTH = 640;
   static const uint32_t STREAM_HEIGHT = 480;
+  static uint32_t panel_h;
+  static uint32_t panel_w;
 };
 
 #endif // APPLOGIC_H

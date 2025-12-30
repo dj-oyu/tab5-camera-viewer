@@ -2,44 +2,51 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <cstdint>
+#include <cstring>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
 #define STACK_DEPTH 8192
+
+uint32_t AppLogic::panel_h = 0;
+uint32_t AppLogic::panel_w = 0;
 
 QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::freeQueue = nullptr;
 uint16_t *AppLogic::decode_buf = nullptr;
 
-size_t AppLogic::find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len, bool *result) {
+bool AppLogic::find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len,
+                           uint8_t **pos) {
   uint32_t test;
   for (size_t i = 0; i < len - 4; i += 4) {
     test = ~(buf[i] | buf[i + 1] << 8 | buf[i + 2] << 16 | buf[i + 3] << 24);
     if ((test - 0x01010101u & ~test & 0x80808080u) == 0)
       continue;
     for (size_t j = 0; j < 4; j++) {
-      if(buf[i + j] == 0xFFu && buf[i + j + 1] == adjacent) {
-        *result = true;
-        return i + j;
+      if (buf[i + j] == 0xFFu && buf[i + j + 1] == adjacent) {
+        *pos = &buf[i + j];
+        return true;
       }
     }
   }
 
-  for (size_t i = len / 4 * 4; i < len; i++) {
-    if(buf[i] == 0xFFu && buf[i + 1] == adjacent) {
-      *result = true;
-      return i;
+  for (size_t i = len / 4 * 4; i < len - 1; i++) {
+    if (buf[i] == 0xFFu && buf[i + 1] == adjacent) {
+      *pos = &buf[i];
+      return true;
     }
   }
-  *result = false;
-  return 0;
+  return false;
 }
 
 void AppLogic::begin() {
   auto cfg = M5.config();
   M5.begin(cfg);
 
-  M5.Display.setRotation(1);
+  // M5.Display.setRotation(1);
   M5.Display.fillScreen(TFT_BLACK);
+  panel_h = M5.Display.height();
+  panel_w = M5.Display.width();
+
   M5.Display.println("MJPEG Profiling Mode...");
 
   freeQueue = xQueueCreate(3, sizeof(uint8_t *));
@@ -98,7 +105,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           continue;
         }
 
-        size_t f_pos = 0;
+        uint8_t *start = nullptr;
         bool soi = false, found = false;
 
         // 1. Search for SOI (0xFF 0xD8)
@@ -112,10 +119,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           // Read into temporary location to search
           int r = stream->read(buf, 4096);
           if (r > 0) {
-            size_t p = find_FF_pos(buf, 0xD8u, r, &found);
+            found = find_FF_pos(buf, 0xD8u, r, &start);
             if (found) {
-              memmove(buf, &buf[p], r - p);
-              f_pos = r - p;
+              size_t remain = r - (start - buf);
+              memmove(buf, start, remain);
+              start = buf + remain;
               soi = true;
               break;
             }
@@ -124,10 +132,9 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
 
         // 2. Direct Bulk Read until EOI (0xFF 0xD9)
         bool eoi = false;
-        uint8_t last_byte = (f_pos > 0) ? buf[f_pos - 1] : 0;
         const size_t MAX_F = 511 * 1024;
 
-        while (stream->connected() && soi && !eoi && f_pos < MAX_F) {
+        while (stream->connected() && soi && !eoi && start < buf + MAX_F) {
           int avail = stream->available();
           if (avail <= 0) {
             vTaskDelay(1);
@@ -135,36 +142,26 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           }
 
           size_t to_read = (avail > 4096) ? 4096 : avail;
-          if (f_pos + to_read > MAX_F)
-            to_read = MAX_F - f_pos;
+          if (start + to_read > buf + MAX_F)
+            to_read = buf + MAX_F - start;
 
-          int r = stream->read(&buf[f_pos], to_read);
+          int r = stream->read(start, to_read);
           if (r > 0) {
-            size_t p = find_FF_pos(&buf[f_pos], 0xD9u, r, &found);
+            bool found = find_FF_pos(start, 0xD9u, r, &start);
             if (found) {
-              f_pos += r - p + 1;
+              start += 2;
               eoi = true;
               break;
-            } 
-            f_pos += r;
-            // for (int i = 0; i < r; i++) {
-            //   if (last_byte == 0xFF && buf[f_pos + i] == 0xD9) {
-            //     f_pos += (i + 1);
-            //     eoi = true;
-            //     break;
-            //   }
-            //   last_byte = buf[f_pos + i];
-            // }
-            // if (!eoi)
-            //   f_pos += r;
+            }
+            start += r;
           }
         }
 
         if (eoi) {
-          for (int i = 0; i < 512 && f_pos < 512 * 1024; i++)
-            buf[f_pos++] = 0;
+          memset(start, 0,
+                 min((size_t)512, (size_t)(buf + 512 * 1024 - start)));
           esp_cache_msync(buf, 512 * 1024, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-          FrameData fd = {buf, f_pos};
+          FrameData fd = {buf, (size_t)(start - buf)};
           xQueueSend(frameQueue, &fd, 0);
         } else {
           xQueueSend(freeQueue, &buf, 0);
@@ -192,16 +189,17 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   };
 
   FrameData fd;
-  uint32_t frames = 0, last_fps = millis();
+  uint32_t frames = 0, last_fps = millis(), stride = panel_w;
+  uint32_t x_offset = (panel_w - STREAM_WIDTH) / 2,
+           y_offset = (panel_h - STREAM_HEIGHT) / 2;
 
   auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
   auto detail = dsi->config_detail();
   void *fb = detail.buffer;
-  uint32_t stride = 720;
 
   while (1) {
     if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
-      uint32_t t1 = millis();
+      // uint32_t t1 = millis();
       uint32_t out_size;
       size_t look_ahead_len = fd.len + 512;
       if (look_ahead_len > 512 * 1024)
@@ -210,37 +208,38 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
       if (jpeg_decoder_process(
               decoder, &dec_cfg, fd.buf, look_ahead_len, (uint8_t *)decode_buf,
               STREAM_WIDTH * STREAM_HEIGHT * 2, &out_size) == ESP_OK) {
-        uint32_t t2 = millis();
+        // uint32_t t2 = millis();
 
         esp_cache_msync(decode_buf, STREAM_WIDTH * STREAM_HEIGHT * 2,
-                        ESP_CACHE_MSYNC_FLAG_DIR_M2C |
-                            ESP_CACHE_MSYNC_FLAG_INVALIDATE);
-
+          ESP_CACHE_MSYNC_FLAG_DIR_M2C |
+          ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+          
         uint16_t *src = (uint16_t *)decode_buf;
         uint16_t *dst = (uint16_t *)fb;
         for (int y = 0; y < (int)STREAM_HEIGHT; y++) {
-          memcpy(&dst[y * stride], &src[y * STREAM_WIDTH], STREAM_WIDTH * 2);
+          memcpy(&dst[(y + y_offset) * stride + x_offset],
+                 &src[y * STREAM_WIDTH], STREAM_WIDTH * 2);
         }
 
         esp_cache_msync(fb, STREAM_HEIGHT * stride * 2,
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M |
                             ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-        uint32_t t3 = millis();
+        // uint32_t t3 = millis();
 
-        frames++;
-        if (frames % 10 == 0) {
-          Serial.printf("Decode:%ums Copy:%lums\n", (unsigned int)(t2 - t1),
-                        (unsigned int)(t3 - t2));
-        }
+        // frames++;
+        // if (frames % 10 == 0) {
+        //   Serial.printf("Decode:%ums Copy:%lums\n", (unsigned int)(t2 - t1),
+        //                 (unsigned int)(t3 - t2));
+        // }
       }
       xQueueSend(freeQueue, &fd.buf, 0);
     }
 
-    if (millis() - last_fps >= 1000) {
-      Serial.printf("FPS: %u\n", (unsigned int)frames);
-      frames = 0;
-      last_fps = millis();
-    }
+    // if (millis() - last_fps >= 1000) {
+    //   Serial.printf("FPS: %u\n", (unsigned int)frames);
+    //   frames = 0;
+    //   last_fps = millis();
+    // }
     taskYIELD();
   }
 }
