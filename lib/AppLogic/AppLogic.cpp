@@ -14,6 +14,7 @@ QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::linearFreeQueue = nullptr;
 QueueHandle_t AppLogic::rbReleaseQueue = nullptr;
 SemaphoreHandle_t AppLogic::renderReadySema = nullptr;
+SemaphoreHandle_t AppLogic::transferDoneSema = nullptr;
 uint16_t *AppLogic::decode_buf = nullptr;
 uint16_t *AppLogic::fb = nullptr;
 uint8_t *AppLogic::ring_buf = nullptr;
@@ -35,6 +36,9 @@ void AppLogic::begin() {
   rbReleaseQueue = xQueueCreate(4, sizeof(size_t));
   renderReadySema = xSemaphoreCreateBinary();
   xSemaphoreGive(renderReadySema);
+  transferDoneSema = xSemaphoreCreateBinary();
+
+  PPAPipeline::begin();
 
   ring_buf = (uint8_t *)heap_caps_aligned_alloc(
       64, RING_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -232,9 +236,6 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   };
 
   FrameData fd;
-  uint32_t stride = panel_w;
-  uint32_t x_offset = (panel_w - STREAM_WIDTH) / 2,
-           y_offset = (panel_h - STREAM_HEIGHT) / 2;
 
   while (1) {
     if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
@@ -253,16 +254,26 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
           xQueueSend(rbReleaseQueue, &fd.len, 0);
         }
 
+        // Invalidate cache for decode_buf because HW wrote it and DMA/PPA will read it.
         esp_cache_msync(decode_buf, out_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C |
                             ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 
-        uint16_t *src = (uint16_t *)decode_buf;
-        uint16_t *dst = (uint16_t *)fb;
-        for (int y = 0; y < (int)STREAM_HEIGHT; y++) {
-          memcpy(&dst[(y + y_offset) * stride + x_offset],
-                 &src[y * STREAM_WIDTH], STREAM_WIDTH * 2);
+        // Use PPAPipeline to copy from decode_buf to fb
+        // Assuming decode_buf is RGB565 and fb is RGB565
+        bool copied = PPAPipeline::copy(
+            (const uint8_t*)decode_buf, (uint8_t*)fb,
+            STREAM_WIDTH, STREAM_HEIGHT,
+            panel_w, panel_h,
+            PPA_SRM_COLOR_MODE_RGB565, PPA_SRM_COLOR_MODE_RGB565,
+            transferDoneSema
+        );
+
+        if (copied) {
+           xSemaphoreTake(transferDoneSema, portMAX_DELAY);
+           // PPA copy done.
         }
+
       } else {
         // Handle decode fail: still need to release buffer
         if (fd.is_linear) {
@@ -272,7 +283,6 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
       }
 
-      // INSTRUCTION: mjpegFetchTaskのxQueueSendはここに来るまで待機する
       // Signal that we are ready for the next frame handover
       xSemaphoreGive(renderReadySema);
     }

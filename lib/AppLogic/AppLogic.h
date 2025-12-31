@@ -8,6 +8,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <esp_lcd_types.h>
+#include <PPAPipeline.h>
 
 class AppLogic {
 public:
@@ -29,6 +31,7 @@ private:
   static QueueHandle_t linearFreeQueue;
   static QueueHandle_t rbReleaseQueue;
   static SemaphoreHandle_t renderReadySema;
+  static SemaphoreHandle_t transferDoneSema;
   static uint16_t *fb;
   static uint16_t *decode_buf;
   static uint8_t *ring_buf;
