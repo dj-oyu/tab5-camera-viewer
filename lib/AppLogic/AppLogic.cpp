@@ -13,6 +13,7 @@ uint32_t AppLogic::panel_w = 0;
 QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::freeQueue = nullptr;
 uint16_t *AppLogic::decode_buf = nullptr;
+uint16_t *AppLogic::fb = nullptr;
 
 bool AppLogic::find_FF_pos(uint8_t *buf, uint8_t adjacent, size_t len,
                            uint8_t **pos) {
@@ -56,6 +57,10 @@ void AppLogic::begin() {
         64, 512 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     xQueueSend(freeQueue, &buf, 0);
   }
+
+  auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
+  auto detail = dsi->config_detail();
+  fb = (uint16_t *)detail.buffer;
 
   decode_buf =
       (uint16_t *)heap_caps_aligned_alloc(64, STREAM_WIDTH * STREAM_HEIGHT * 2,
@@ -200,10 +205,6 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   uint32_t x_offset = (panel_w - STREAM_WIDTH) / 2,
            y_offset = (panel_h - STREAM_HEIGHT) / 2;
 
-  auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
-  auto detail = dsi->config_detail();
-  void *fb = detail.buffer;
-
   while (1) {
     if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
       // uint32_t t1 = millis();
@@ -220,7 +221,6 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         esp_cache_msync(decode_buf, out_size,
           ESP_CACHE_MSYNC_FLAG_DIR_M2C |
           ESP_CACHE_MSYNC_FLAG_INVALIDATE);
-          
         uint16_t *src = (uint16_t *)decode_buf;
         uint16_t *dst = (uint16_t *)fb;
         for (int y = 0; y < (int)STREAM_HEIGHT; y++) {

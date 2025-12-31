@@ -27,6 +27,7 @@ private:
 
   static QueueHandle_t frameQueue;
   static QueueHandle_t freeQueue;
+  static uint16_t *fb;
   static uint16_t *decode_buf;
 
   static const uint32_t STREAM_WIDTH = 640;
