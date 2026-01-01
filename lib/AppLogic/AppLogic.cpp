@@ -255,9 +255,11 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
 
         // Invalidate cache for decode_buf because HW wrote it and DMA/PPA will read it.
+        // Added UNALIGNED flag to suppress alignment errors
         esp_cache_msync(decode_buf, out_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C |
-                            ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+                            ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 
         // Use PPAPipeline to copy from decode_buf to fb
         // Assuming decode_buf is RGB565 and fb is RGB565

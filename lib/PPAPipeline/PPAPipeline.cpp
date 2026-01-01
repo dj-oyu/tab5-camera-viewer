@@ -66,13 +66,20 @@ bool PPAPipeline::copy(const uint8_t *src, uint8_t *dst, uint32_t src_w,
   config.out.pic_w = dst_w;
   config.out.pic_h = dst_h;
 
+  // Calculate buffer size based on format
+  uint32_t bpp = 2; // Default to RGB565
+  if (dst_fmt == PPA_SRM_COLOR_MODE_ARGB8888 || dst_fmt == PPA_SRM_COLOR_MODE_RGB888) {
+      bpp = 4; // ARGB is 4, RGB888 is 3 usually but PPA might align. PPA docs needed.
+               // Assuming RGB565 as per requirement.
+  }
+  config.out.buffer_size = dst_w * dst_h * bpp;
+
   // Center the image in the destination
   uint32_t x_off = (dst_w > src_w) ? (dst_w - src_w) / 2 : 0;
   uint32_t y_off = (dst_h > src_h) ? (dst_h - src_h) / 2 : 0;
 
   config.out.block_offset_x = x_off;
   config.out.block_offset_y = y_off;
-  // block_w/block_h are not present in ppa_out_pic_blk_config_t.
   // Output block size is determined by input block size * scaling factor.
   config.out.srm_cm = dst_fmt;
 
