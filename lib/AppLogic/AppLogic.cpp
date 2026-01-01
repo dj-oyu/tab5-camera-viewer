@@ -14,18 +14,23 @@ QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::linearFreeQueue = nullptr;
 QueueHandle_t AppLogic::rbReleaseQueue = nullptr;
 SemaphoreHandle_t AppLogic::renderReadySema = nullptr;
-SemaphoreHandle_t AppLogic::transferDoneSema = nullptr;
+esp_lcd_panel_handle_t AppLogic::panel_handle = nullptr;
 uint16_t *AppLogic::decode_bufs[2] = {nullptr, nullptr};
 int AppLogic::decode_idx = 0;
 uint16_t *AppLogic::fb = nullptr;
 uint8_t *AppLogic::ring_buf = nullptr;
 uint8_t *AppLogic::linear_bufs[2] = {nullptr, nullptr};
 
+// Helper class to access protected member
+class Panel_DSI_Accessor : public lgfx::Panel_DSI {
+public:
+    esp_lcd_panel_handle_t getHandle() { return _disp_panel_handle; }
+};
+
 void AppLogic::begin() {
   auto cfg = M5.config();
   M5.begin(cfg);
 
-  // M5.Display.setRotation(1);
   M5.Display.fillScreen(TFT_BLACK);
   panel_h = M5.Display.height();
   panel_w = M5.Display.width();
@@ -38,11 +43,6 @@ void AppLogic::begin() {
   renderReadySema = xSemaphoreCreateBinary();
   xSemaphoreGive(renderReadySema);
 
-  transferDoneSema = xSemaphoreCreateBinary();
-  xSemaphoreGive(transferDoneSema); // Initially available so first frame doesn't block
-
-  PPAPipeline::begin();
-
   ring_buf = (uint8_t *)heap_caps_aligned_alloc(
       64, RING_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
@@ -53,10 +53,15 @@ void AppLogic::begin() {
     xQueueSend(linearFreeQueue, &ptr, 0);
   }
 
+  // Get Panel Handle
   auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
+  auto accessor = static_cast<Panel_DSI_Accessor*>(dsi);
+  panel_handle = accessor->getHandle();
+
   auto detail = dsi->config_detail();
   fb = (uint16_t *)detail.buffer;
 
+  // Allocate 2 decode buffers in PSRAM
   for (int i = 0; i < 2; i++) {
     decode_bufs[i] = (uint16_t *)heap_caps_aligned_alloc(
         64, STREAM_WIDTH * STREAM_HEIGHT * 2,
@@ -111,14 +116,14 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 1. Reclaim space
         size_t relLength;
         while (xQueueReceive(rbReleaseQueue, &relLength, 0) == pdTRUE) {
-          rb_tail = (rb_tail + relLength) & BUFFER_MASK;
+          rb_tail = (rb_tail + relLength) % RING_BUF_SIZE;
         }
 
-        // 2. Read from stream into RB (non-blocking chunk)
+        // 2. Read from stream into RB
         int avail = stream->available();
         if (avail > 0) {
           uint32_t rb_fill =
-              (rb_head - rb_tail + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_tail + RING_BUF_SIZE) % RING_BUF_SIZE;
           uint32_t space = RING_BUF_SIZE - rb_fill - 1;
           if (space > 0) {
             uint32_t to_read = min((uint32_t)avail, (uint32_t)4096);
@@ -127,30 +132,30 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
             uint32_t first_part = min(to_read, RING_BUF_SIZE - rb_head);
             int r1 = stream->read(&ring_buf[rb_head], first_part);
             if (r1 > 0) {
-              rb_head = (rb_head + r1) & BUFFER_MASK;
+              rb_head = (rb_head + r1) % RING_BUF_SIZE;
               if (r1 < (int)to_read) {
                 int r2 = stream->read(&ring_buf[rb_head], to_read - r1);
                 if (r2 > 0)
-                  rb_head = (rb_head + r2) & BUFFER_MASK;
+                  rb_head = (rb_head + r2) % RING_BUF_SIZE;
               }
             }
           }
         }
 
-        // 3. Parse Frame (if none pending)
+        // 3. Parse Frame
         if (!pendingFrame) {
           uint32_t bytes_to_parse =
-              (rb_head - rb_parsed + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_parsed + RING_BUF_SIZE) % RING_BUF_SIZE;
           if (bytes_to_parse >= 2) {
             uint32_t junk = 0;
             bool found_soi = false;
             while (bytes_to_parse >= 2) {
               if (ring_buf[rb_parsed] == 0xFF &&
-                  ring_buf[(rb_parsed + 1) & BUFFER_MASK] == 0xD8) {
+                  ring_buf[(rb_parsed + 1) % RING_BUF_SIZE] == 0xD8) {
                 found_soi = true;
                 break;
               }
-              rb_parsed = (rb_parsed + 1) & BUFFER_MASK;
+              rb_parsed = (rb_parsed + 1) % RING_BUF_SIZE;
               bytes_to_parse--;
               junk++;
             }
@@ -158,32 +163,33 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               xQueueSend(rbReleaseQueue, &junk, 0);
 
             if (found_soi) {
-              uint32_t search = (rb_parsed + 2) & BUFFER_MASK;
+              uint32_t search = (rb_parsed + 2) % RING_BUF_SIZE;
               uint32_t len = 2;
               bool found_eoi = false;
               while (len + 1 <= bytes_to_parse) {
                 if (ring_buf[search] == 0xFF &&
-                    ring_buf[(search + 1) & BUFFER_MASK] == 0xD9) {
+                    ring_buf[(search + 1) % RING_BUF_SIZE] == 0xD9) {
                   len += 2;
                   found_eoi = true;
                   break;
                 }
-                search = (search + 1) & BUFFER_MASK;
+                search = (search + 1) % RING_BUF_SIZE;
                 len++;
               }
 
               if (found_eoi) {
                 fdPending.len = len;
                 bool is_contiguous = (rb_parsed + len <= RING_BUF_SIZE);
-                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) & (64 - 1)) == 0;
+                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) % 64 == 0);
 
                 if (is_contiguous && is_aligned) {
                   fdPending.buf = &ring_buf[rb_parsed];
                   fdPending.is_linear = false;
+                  // FIX: Added UNALIGNED flag to prevent cache errors
                   esp_cache_msync(fdPending.buf, fdPending.len,
-                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
                   pendingFrame = true;
-                  rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                  rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                 } else {
                   uint8_t *lbuf = nullptr;
                   if (xQueueReceive(linearFreeQueue, &lbuf, 0) == pdTRUE) {
@@ -196,10 +202,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
                     }
                     fdPending.buf = lbuf;
                     fdPending.is_linear = true;
+                    // FIX: Added UNALIGNED flag
                     esp_cache_msync(fdPending.buf, fdPending.len,
-                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
                     pendingFrame = true;
-                    rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                    rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                     xQueueSend(rbReleaseQueue, &len, 0);
                   }
                 }
@@ -208,7 +215,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
           }
         }
 
-        // 4. Dispatch Frame (if renderer ready)
+        // 4. Dispatch Frame
         if (pendingFrame) {
           if (xSemaphoreTake(renderReadySema, 0) == pdTRUE) {
             if (xQueueSend(frameQueue, &fdPending, 0) == pdTRUE) {
@@ -241,56 +248,48 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   };
 
   FrameData fd;
+  uint32_t x_offset = (panel_w - STREAM_WIDTH) / 2;
+  uint32_t y_offset = (panel_h - STREAM_HEIGHT) / 2;
 
   while (1) {
     if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
       uint32_t out_size;
 
-      // 1. Decode to the current decode buffer
-      //    (This happens while PPA might be copying the PREVIOUS buffer)
+      // Decode into the current double-buffer
+      // The JPEG bitstream (fd.buf) is already cache-synced C2M in FetchTask.
       if (jpeg_decoder_process(
               decoder, &dec_cfg, fd.buf, fd.len, (uint8_t *)decode_bufs[decode_idx],
               STREAM_WIDTH * STREAM_HEIGHT * 2, &out_size) == ESP_OK) {
 
-        // 2. Release Input Buffer Immediately
+        // Release input buffer so Fetcher can continue
         if (fd.is_linear) {
           xQueueSend(linearFreeQueue, &fd.buf, 0);
         } else {
           xQueueSend(rbReleaseQueue, &fd.len, 0);
         }
 
-        // 3. Wait for Previous PPA to finish
-        //    (We cannot start a new PPA transaction until the previous one is done,
-        //     and we also implicitly wait for the PREVIOUS decode buffer to be free
-        //     since PPA uses it).
-        //    Actually, PPA copies From decode_bufs[prev] To fb.
-        //    We just wrote to decode_bufs[current].
-        //    If prev == current (single buffer), we had to wait BEFORE decode.
-        //    With double buffer, we decode to current, while PPA reads prev.
-        //    So we must ensure PPA is done with prev before we overwrite it?
-        //    No, we write to `current`. `prev` is being read. They are different buffers.
-        //    We must ensure PPA is done before we START the next PPA transaction
-        //    (if PPA queue depth is 1 or we want to strictly serialize FB updates).
+        // Cache Sync: decode_bufs was written by HW (Jpeg).
+        // If esp_lcd_panel_draw_bitmap uses DMA (PPA), we theoretically don't need sync if coherent.
+        // However, to be safe, we invalidate so CPU *could* read it, and ensure consistency.
+        // Or if drawing via CPU memcpy (fallback), we MUST invalidate.
+        // The sample code did sync.
+        esp_cache_msync(decode_bufs[decode_idx], out_size,
+                        ESP_CACHE_MSYNC_FLAG_DIR_M2C |
+                            ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
 
-        xSemaphoreTake(transferDoneSema, portMAX_DELAY);
-
-        // 4. Start PPA Copy (Current Decode Buf -> FB)
-        //    (Removed cache sync to test performance/alignment)
-        bool copied = PPAPipeline::copy(
-            (const uint8_t*)decode_bufs[decode_idx], (uint8_t*)fb,
-            STREAM_WIDTH, STREAM_HEIGHT,
-            panel_w, panel_h,
-            PPA_SRM_COLOR_MODE_RGB565, PPA_SRM_COLOR_MODE_RGB565,
-            transferDoneSema
-        );
-
-        if (!copied) {
-           // If failed to start, give back semaphore so we don't hang next loop
-           xSemaphoreGive(transferDoneSema);
+        // Draw to Panel using IDF API
+        // This function handles the transfer to the display framebuffer.
+        // If DMA is enabled in the driver, this will be fast and asynchronous.
+        if (panel_handle) {
+            esp_lcd_panel_draw_bitmap(panel_handle,
+                                      x_offset, y_offset,
+                                      x_offset + STREAM_WIDTH, y_offset + STREAM_HEIGHT,
+                                      decode_bufs[decode_idx]);
         }
 
-        // 5. Swap Buffers
-        decode_idx ^= 1;
+        // Swap decode buffer
+        decode_idx = (decode_idx + 1) % 2;
 
       } else {
         // Handle decode fail
@@ -301,7 +300,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
       }
 
-      // 6. Signal Fetcher
+      // Signal Fetcher
       xSemaphoreGive(renderReadySema);
     }
     taskYIELD();

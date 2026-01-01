@@ -8,8 +8,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <esp_lcd_panel_ops.h>
 #include <esp_lcd_types.h>
-#include <PPAPipeline.h>
 
 class AppLogic {
 public:
@@ -31,17 +31,16 @@ private:
   static QueueHandle_t linearFreeQueue;
   static QueueHandle_t rbReleaseQueue;
   static SemaphoreHandle_t renderReadySema;
-  static SemaphoreHandle_t transferDoneSema;
-  static uint16_t *fb;
+  static esp_lcd_panel_handle_t panel_handle;
   static uint16_t *decode_bufs[2];
   static int decode_idx;
+  static uint16_t *fb;
   static uint8_t *ring_buf;
   static uint8_t *linear_bufs[2];
 
   static const uint32_t STREAM_WIDTH = 640;
   static const uint32_t STREAM_HEIGHT = 480;
   static const uint32_t RING_BUF_SIZE = 1024 * 1024;
-  static const uint32_t BUFFER_MASK = RING_BUF_SIZE - 1;
   static const uint32_t LINEAR_BUF_SIZE = 512 * 1024;
   static uint32_t panel_h;
   static uint32_t panel_w;
