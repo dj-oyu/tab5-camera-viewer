@@ -111,14 +111,14 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 1. Reclaim space
         size_t relLength;
         while (xQueueReceive(rbReleaseQueue, &relLength, 0) == pdTRUE) {
-          rb_tail = (rb_tail + relLength) & BUFFER_MASK;
+          rb_tail = (rb_tail + relLength) % RING_BUF_SIZE;
         }
 
         // 2. Read from stream into RB (non-blocking chunk)
         int avail = stream->available();
         if (avail > 0) {
           uint32_t rb_fill =
-              (rb_head - rb_tail + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_tail + RING_BUF_SIZE) % RING_BUF_SIZE;
           uint32_t space = RING_BUF_SIZE - rb_fill - 1;
           if (space > 0) {
             uint32_t to_read = min((uint32_t)avail, (uint32_t)4096);
@@ -127,11 +127,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
             uint32_t first_part = min(to_read, RING_BUF_SIZE - rb_head);
             int r1 = stream->read(&ring_buf[rb_head], first_part);
             if (r1 > 0) {
-              rb_head = (rb_head + r1) & BUFFER_MASK;
+              rb_head = (rb_head + r1) % RING_BUF_SIZE;
               if (r1 < (int)to_read) {
                 int r2 = stream->read(&ring_buf[rb_head], to_read - r1);
                 if (r2 > 0)
-                  rb_head = (rb_head + r2) & BUFFER_MASK;
+                  rb_head = (rb_head + r2) % RING_BUF_SIZE;
               }
             }
           }
@@ -140,17 +140,17 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 3. Parse Frame (if none pending)
         if (!pendingFrame) {
           uint32_t bytes_to_parse =
-              (rb_head - rb_parsed + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_parsed + RING_BUF_SIZE) % RING_BUF_SIZE;
           if (bytes_to_parse >= 2) {
             uint32_t junk = 0;
             bool found_soi = false;
             while (bytes_to_parse >= 2) {
               if (ring_buf[rb_parsed] == 0xFF &&
-                  ring_buf[(rb_parsed + 1) & BUFFER_MASK] == 0xD8) {
+                  ring_buf[(rb_parsed + 1) % RING_BUF_SIZE] == 0xD8) {
                 found_soi = true;
                 break;
               }
-              rb_parsed = (rb_parsed + 1) & BUFFER_MASK;
+              rb_parsed = (rb_parsed + 1) % RING_BUF_SIZE;
               bytes_to_parse--;
               junk++;
             }
@@ -158,32 +158,32 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               xQueueSend(rbReleaseQueue, &junk, 0);
 
             if (found_soi) {
-              uint32_t search = (rb_parsed + 2) & BUFFER_MASK;
+              uint32_t search = (rb_parsed + 2) % RING_BUF_SIZE;
               uint32_t len = 2;
               bool found_eoi = false;
               while (len + 1 <= bytes_to_parse) {
                 if (ring_buf[search] == 0xFF &&
-                    ring_buf[(search + 1) & BUFFER_MASK] == 0xD9) {
+                    ring_buf[(search + 1) % RING_BUF_SIZE] == 0xD9) {
                   len += 2;
                   found_eoi = true;
                   break;
                 }
-                search = (search + 1) & BUFFER_MASK;
+                search = (search + 1) % RING_BUF_SIZE;
                 len++;
               }
 
               if (found_eoi) {
                 fdPending.len = len;
                 bool is_contiguous = (rb_parsed + len <= RING_BUF_SIZE);
-                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) & (64 - 1)) == 0;
+                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) % 64 == 0);
 
                 if (is_contiguous && is_aligned) {
                   fdPending.buf = &ring_buf[rb_parsed];
                   fdPending.is_linear = false;
                   esp_cache_msync(fdPending.buf, fdPending.len,
-                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
                   pendingFrame = true;
-                  rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                  rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                 } else {
                   uint8_t *lbuf = nullptr;
                   if (xQueueReceive(linearFreeQueue, &lbuf, 0) == pdTRUE) {
@@ -197,9 +197,9 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
                     fdPending.buf = lbuf;
                     fdPending.is_linear = true;
                     esp_cache_msync(fdPending.buf, fdPending.len,
-                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
                     pendingFrame = true;
-                    rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                    rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                     xQueueSend(rbReleaseQueue, &len, 0);
                   }
                 }
@@ -290,7 +290,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
 
         // 5. Swap Buffers
-        decode_idx ^= 1;
+        decode_idx = (decode_idx + 1) % 2;
 
       } else {
         // Handle decode fail
