@@ -111,14 +111,14 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 1. Reclaim space
         size_t relLength;
         while (xQueueReceive(rbReleaseQueue, &relLength, 0) == pdTRUE) {
-          rb_tail = (rb_tail + relLength) % RING_BUF_SIZE;
+          rb_tail = (rb_tail + relLength) & BUFFER_MASK;
         }
 
         // 2. Read from stream into RB (non-blocking chunk)
         int avail = stream->available();
         if (avail > 0) {
           uint32_t rb_fill =
-              (rb_head - rb_tail + RING_BUF_SIZE) % RING_BUF_SIZE;
+              (rb_head - rb_tail + RING_BUF_SIZE) & BUFFER_MASK;
           uint32_t space = RING_BUF_SIZE - rb_fill - 1;
           if (space > 0) {
             uint32_t to_read = min((uint32_t)avail, (uint32_t)4096);
@@ -127,11 +127,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
             uint32_t first_part = min(to_read, RING_BUF_SIZE - rb_head);
             int r1 = stream->read(&ring_buf[rb_head], first_part);
             if (r1 > 0) {
-              rb_head = (rb_head + r1) % RING_BUF_SIZE;
+              rb_head = (rb_head + r1) & BUFFER_MASK;
               if (r1 < (int)to_read) {
                 int r2 = stream->read(&ring_buf[rb_head], to_read - r1);
                 if (r2 > 0)
-                  rb_head = (rb_head + r2) % RING_BUF_SIZE;
+                  rb_head = (rb_head + r2) & BUFFER_MASK;
               }
             }
           }
@@ -140,17 +140,17 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 3. Parse Frame (if none pending)
         if (!pendingFrame) {
           uint32_t bytes_to_parse =
-              (rb_head - rb_parsed + RING_BUF_SIZE) % RING_BUF_SIZE;
+              (rb_head - rb_parsed + RING_BUF_SIZE) & BUFFER_MASK;
           if (bytes_to_parse >= 2) {
             uint32_t junk = 0;
             bool found_soi = false;
             while (bytes_to_parse >= 2) {
               if (ring_buf[rb_parsed] == 0xFF &&
-                  ring_buf[(rb_parsed + 1) % RING_BUF_SIZE] == 0xD8) {
+                  ring_buf[(rb_parsed + 1) & BUFFER_MASK] == 0xD8) {
                 found_soi = true;
                 break;
               }
-              rb_parsed = (rb_parsed + 1) % RING_BUF_SIZE;
+              rb_parsed = (rb_parsed + 1) & BUFFER_MASK;
               bytes_to_parse--;
               junk++;
             }
@@ -163,12 +163,12 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               bool found_eoi = false;
               while (len + 1 <= bytes_to_parse) {
                 if (ring_buf[search] == 0xFF &&
-                    ring_buf[(search + 1) % RING_BUF_SIZE] == 0xD9) {
+                    ring_buf[(search + 1) & BUFFER_MASK] == 0xD9) {
                   len += 2;
                   found_eoi = true;
                   break;
                 }
-                search = (search + 1) % RING_BUF_SIZE;
+                search = (search + 1) & BUFFER_MASK;
                 len++;
               }
 
@@ -183,7 +183,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
                   esp_cache_msync(fdPending.buf, fdPending.len,
                                   ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                   pendingFrame = true;
-                  rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
+                  rb_parsed = (rb_parsed + len) & BUFFER_MASK;
                 } else {
                   uint8_t *lbuf = nullptr;
                   if (xQueueReceive(linearFreeQueue, &lbuf, 0) == pdTRUE) {
@@ -199,7 +199,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
                     esp_cache_msync(fdPending.buf, fdPending.len,
                                     ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                     pendingFrame = true;
-                    rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
+                    rb_parsed = (rb_parsed + len) & BUFFER_MASK;
                     xQueueSend(rbReleaseQueue, &len, 0);
                   }
                 }
@@ -290,7 +290,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
 
         // 5. Swap Buffers
-        decode_idx = (decode_idx + 1) % 2;
+        decode_idx ^= 1;
 
       } else {
         // Handle decode fail
