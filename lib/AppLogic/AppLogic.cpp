@@ -158,7 +158,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               xQueueSend(rbReleaseQueue, &junk, 0);
 
             if (found_soi) {
-              uint32_t search = (rb_parsed + 2) % RING_BUF_SIZE;
+              uint32_t search = (rb_parsed + 2) & BUFFER_MASK;
               uint32_t len = 2;
               bool found_eoi = false;
               while (len + 1 <= bytes_to_parse) {
@@ -175,7 +175,7 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               if (found_eoi) {
                 fdPending.len = len;
                 bool is_contiguous = (rb_parsed + len <= RING_BUF_SIZE);
-                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) % 64 == 0);
+                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) & (64 - 1)) == 0;
 
                 if (is_contiguous && is_aligned) {
                   fdPending.buf = &ring_buf[rb_parsed];
