@@ -116,14 +116,14 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 1. Reclaim space
         size_t relLength;
         while (xQueueReceive(rbReleaseQueue, &relLength, 0) == pdTRUE) {
-          rb_tail = (rb_tail + relLength) & BUFFER_MASK;
+          rb_tail = (rb_tail + relLength) % RING_BUF_SIZE;
         }
 
         // 2. Read from stream into RB
         int avail = stream->available();
         if (avail > 0) {
           uint32_t rb_fill =
-              (rb_head - rb_tail + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_tail + RING_BUF_SIZE) % RING_BUF_SIZE;
           uint32_t space = RING_BUF_SIZE - rb_fill - 1;
           if (space > 0) {
             uint32_t to_read = min((uint32_t)avail, (uint32_t)4096);
@@ -132,11 +132,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
             uint32_t first_part = min(to_read, RING_BUF_SIZE - rb_head);
             int r1 = stream->read(&ring_buf[rb_head], first_part);
             if (r1 > 0) {
-              rb_head = (rb_head + r1) & BUFFER_MASK;
+              rb_head = (rb_head + r1) % RING_BUF_SIZE;
               if (r1 < (int)to_read) {
                 int r2 = stream->read(&ring_buf[rb_head], to_read - r1);
                 if (r2 > 0)
-                  rb_head = (rb_head + r2) & BUFFER_MASK;
+                  rb_head = (rb_head + r2) % RING_BUF_SIZE;
               }
             }
           }
@@ -145,17 +145,17 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         // 3. Parse Frame
         if (!pendingFrame) {
           uint32_t bytes_to_parse =
-              (rb_head - rb_parsed + RING_BUF_SIZE) & BUFFER_MASK;
+              (rb_head - rb_parsed + RING_BUF_SIZE) % RING_BUF_SIZE;
           if (bytes_to_parse >= 2) {
             uint32_t junk = 0;
             bool found_soi = false;
             while (bytes_to_parse >= 2) {
               if (ring_buf[rb_parsed] == 0xFF &&
-                  ring_buf[(rb_parsed + 1) & BUFFER_MASK] == 0xD8) {
+                  ring_buf[(rb_parsed + 1) % RING_BUF_SIZE] == 0xD8) {
                 found_soi = true;
                 break;
               }
-              rb_parsed = (rb_parsed + 1) & BUFFER_MASK;
+              rb_parsed = (rb_parsed + 1) % RING_BUF_SIZE;
               bytes_to_parse--;
               junk++;
             }
@@ -163,33 +163,33 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               xQueueSend(rbReleaseQueue, &junk, 0);
 
             if (found_soi) {
-              uint32_t search = (rb_parsed + 2) & BUFFER_MASK;
+              uint32_t search = (rb_parsed + 2) % RING_BUF_SIZE;
               uint32_t len = 2;
               bool found_eoi = false;
               while (len + 1 <= bytes_to_parse) {
                 if (ring_buf[search] == 0xFF &&
-                    ring_buf[(search + 1) & BUFFER_MASK] == 0xD9) {
+                    ring_buf[(search + 1) % RING_BUF_SIZE] == 0xD9) {
                   len += 2;
                   found_eoi = true;
                   break;
                 }
-                search = (search + 1) & BUFFER_MASK;
+                search = (search + 1) % RING_BUF_SIZE;
                 len++;
               }
 
               if (found_eoi) {
                 fdPending.len = len;
                 bool is_contiguous = (rb_parsed + len <= RING_BUF_SIZE);
-                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) & 63 == 0);
+                bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed]) % 64 == 0);
 
                 if (is_contiguous && is_aligned) {
                   fdPending.buf = &ring_buf[rb_parsed];
                   fdPending.is_linear = false;
-                  // FIX: Added UNALIGNED flag to prevent cache errors
-                  esp_cache_msync(fdPending.buf, fdPending.len,
-                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+                  // FIX: Manually align length up to 64 bytes
+                  size_t aligned_len = (fdPending.len + 63) & ~63;
+                  esp_cache_msync(fdPending.buf, aligned_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                   pendingFrame = true;
-                  rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                  rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                 } else {
                   uint8_t *lbuf = nullptr;
                   if (xQueueReceive(linearFreeQueue, &lbuf, 0) == pdTRUE) {
@@ -202,11 +202,11 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
                     }
                     fdPending.buf = lbuf;
                     fdPending.is_linear = true;
-                    // FIX: Added UNALIGNED flag
-                    esp_cache_msync(fdPending.buf, fdPending.len,
-                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+                    // FIX: Manually align length
+                    size_t aligned_len = (fdPending.len + 63) & ~63;
+                    esp_cache_msync(fdPending.buf, aligned_len, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                     pendingFrame = true;
-                    rb_parsed = (rb_parsed + len) & BUFFER_MASK;
+                    rb_parsed = (rb_parsed + len) % RING_BUF_SIZE;
                     xQueueSend(rbReleaseQueue, &len, 0);
                   }
                 }
@@ -269,27 +269,29 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
 
         // Cache Sync: decode_bufs was written by HW (Jpeg).
-        // If esp_lcd_panel_draw_bitmap uses DMA (PPA), we theoretically don't need sync if coherent.
-        // However, to be safe, we invalidate so CPU *could* read it, and ensure consistency.
-        // Or if drawing via CPU memcpy (fallback), we MUST invalidate.
-        // The sample code did sync.
-        esp_cache_msync(decode_bufs[decode_idx], out_size,
+        // Manually align up out_size.
+        size_t aligned_len = (out_size + 63) & ~63;
+        esp_cache_msync(decode_bufs[decode_idx], aligned_len,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C |
-                            ESP_CACHE_MSYNC_FLAG_INVALIDATE |
-                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+                            ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 
         // Draw to Panel using IDF API
-        // This function handles the transfer to the display framebuffer.
-        // If DMA is enabled in the driver, this will be fast and asynchronous.
         if (panel_handle) {
-            esp_lcd_panel_draw_bitmap(panel_handle,
-                                      x_offset, y_offset,
-                                      x_offset + STREAM_WIDTH, y_offset + STREAM_HEIGHT,
-                                      decode_bufs[decode_idx]);
+            esp_err_t ret;
+            // Retry loop for non-blocking API
+            do {
+                ret = esp_lcd_panel_draw_bitmap(panel_handle,
+                                          x_offset, y_offset,
+                                          x_offset + STREAM_WIDTH, y_offset + STREAM_HEIGHT,
+                                          decode_bufs[decode_idx]);
+                if (ret != ESP_OK) {
+                    vTaskDelay(1);
+                }
+            } while (ret != ESP_OK);
         }
 
         // Swap decode buffer
-        decode_idx ^= 1;
+        decode_idx = (decode_idx + 1) % 2;
 
       } else {
         // Handle decode fail
