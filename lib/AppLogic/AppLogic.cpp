@@ -15,7 +15,8 @@ QueueHandle_t AppLogic::linearFreeQueue = nullptr;
 QueueHandle_t AppLogic::rbReleaseQueue = nullptr;
 SemaphoreHandle_t AppLogic::renderReadySema = nullptr;
 SemaphoreHandle_t AppLogic::transferDoneSema = nullptr;
-uint16_t *AppLogic::decode_buf = nullptr;
+uint16_t *AppLogic::decode_bufs[2] = {nullptr, nullptr};
+int AppLogic::decode_idx = 0;
 uint16_t *AppLogic::fb = nullptr;
 uint8_t *AppLogic::ring_buf = nullptr;
 uint8_t *AppLogic::linear_bufs[2] = {nullptr, nullptr};
@@ -36,7 +37,9 @@ void AppLogic::begin() {
   rbReleaseQueue = xQueueCreate(4, sizeof(size_t));
   renderReadySema = xSemaphoreCreateBinary();
   xSemaphoreGive(renderReadySema);
+
   transferDoneSema = xSemaphoreCreateBinary();
+  xSemaphoreGive(transferDoneSema); // Initially available so first frame doesn't block
 
   PPAPipeline::begin();
 
@@ -54,9 +57,11 @@ void AppLogic::begin() {
   auto detail = dsi->config_detail();
   fb = (uint16_t *)detail.buffer;
 
-  decode_buf =
-      (uint16_t *)heap_caps_aligned_alloc(64, STREAM_WIDTH * STREAM_HEIGHT * 2,
-                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  for (int i = 0; i < 2; i++) {
+    decode_bufs[i] = (uint16_t *)heap_caps_aligned_alloc(
+        64, STREAM_WIDTH * STREAM_HEIGHT * 2,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
 
   xTaskCreatePinnedToCore(mjpegFetchTask, "Fetch", STACK_DEPTH, NULL, 5, NULL,
                           0);
@@ -240,44 +245,55 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   while (1) {
     if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
       uint32_t out_size;
-      // The "Kick": JPEG data in fd.buf is already cache-synced by fetchTask
+
+      // 1. Decode to the current decode buffer
+      //    (This happens while PPA might be copying the PREVIOUS buffer)
       if (jpeg_decoder_process(
-              decoder, &dec_cfg, fd.buf, fd.len, (uint8_t *)decode_buf,
+              decoder, &dec_cfg, fd.buf, fd.len, (uint8_t *)decode_bufs[decode_idx],
               STREAM_WIDTH * STREAM_HEIGHT * 2, &out_size) == ESP_OK) {
 
-        // INSTRUCTION: ここで次のmjpegフレームの取得を始めたい
-        // Release input buffer immediately so Fetcher can start next frame
-        // processing
+        // 2. Release Input Buffer Immediately
         if (fd.is_linear) {
           xQueueSend(linearFreeQueue, &fd.buf, 0);
         } else {
           xQueueSend(rbReleaseQueue, &fd.len, 0);
         }
 
-        // Invalidate cache for decode_buf because HW wrote it and DMA/PPA will read it.
-        // Added UNALIGNED flag to suppress alignment errors
-        esp_cache_msync(decode_buf, out_size,
-                        ESP_CACHE_MSYNC_FLAG_DIR_M2C |
-                            ESP_CACHE_MSYNC_FLAG_INVALIDATE |
-                            ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        // 3. Wait for Previous PPA to finish
+        //    (We cannot start a new PPA transaction until the previous one is done,
+        //     and we also implicitly wait for the PREVIOUS decode buffer to be free
+        //     since PPA uses it).
+        //    Actually, PPA copies From decode_bufs[prev] To fb.
+        //    We just wrote to decode_bufs[current].
+        //    If prev == current (single buffer), we had to wait BEFORE decode.
+        //    With double buffer, we decode to current, while PPA reads prev.
+        //    So we must ensure PPA is done with prev before we overwrite it?
+        //    No, we write to `current`. `prev` is being read. They are different buffers.
+        //    We must ensure PPA is done before we START the next PPA transaction
+        //    (if PPA queue depth is 1 or we want to strictly serialize FB updates).
 
-        // Use PPAPipeline to copy from decode_buf to fb
-        // Assuming decode_buf is RGB565 and fb is RGB565
+        xSemaphoreTake(transferDoneSema, portMAX_DELAY);
+
+        // 4. Start PPA Copy (Current Decode Buf -> FB)
+        //    (Removed cache sync to test performance/alignment)
         bool copied = PPAPipeline::copy(
-            (const uint8_t*)decode_buf, (uint8_t*)fb,
+            (const uint8_t*)decode_bufs[decode_idx], (uint8_t*)fb,
             STREAM_WIDTH, STREAM_HEIGHT,
             panel_w, panel_h,
             PPA_SRM_COLOR_MODE_RGB565, PPA_SRM_COLOR_MODE_RGB565,
             transferDoneSema
         );
 
-        if (copied) {
-           xSemaphoreTake(transferDoneSema, portMAX_DELAY);
-           // PPA copy done.
+        if (!copied) {
+           // If failed to start, give back semaphore so we don't hang next loop
+           xSemaphoreGive(transferDoneSema);
         }
 
+        // 5. Swap Buffers
+        decode_idx = (decode_idx + 1) % 2;
+
       } else {
-        // Handle decode fail: still need to release buffer
+        // Handle decode fail
         if (fd.is_linear) {
           xQueueSend(linearFreeQueue, &fd.buf, 0);
         } else {
@@ -285,7 +301,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         }
       }
 
-      // Signal that we are ready for the next frame handover
+      // 6. Signal Fetcher
       xSemaphoreGive(renderReadySema);
     }
     taskYIELD();

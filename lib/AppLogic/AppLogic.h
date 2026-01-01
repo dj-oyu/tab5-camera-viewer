@@ -33,7 +33,8 @@ private:
   static SemaphoreHandle_t renderReadySema;
   static SemaphoreHandle_t transferDoneSema;
   static uint16_t *fb;
-  static uint16_t *decode_buf;
+  static uint16_t *decode_bufs[2];
+  static int decode_idx;
   static uint8_t *ring_buf;
   static uint8_t *linear_bufs[2];
 
