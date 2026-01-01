@@ -41,6 +41,7 @@ private:
   static const uint32_t STREAM_WIDTH = 640;
   static const uint32_t STREAM_HEIGHT = 480;
   static const uint32_t RING_BUF_SIZE = 1024 * 1024;
+  static const uint32_t BUFFER_MASK = RING_BUF_SIZE - 1;
   static const uint32_t LINEAR_BUF_SIZE = 512 * 1024;
   static uint32_t panel_h;
   static uint32_t panel_w;
