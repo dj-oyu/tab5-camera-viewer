@@ -1,5 +1,4 @@
 #include "AppLogic.h"
-#include "DisplayInit.h"
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
