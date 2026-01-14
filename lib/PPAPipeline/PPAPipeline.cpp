@@ -104,6 +104,10 @@ bool PPAPipeline::transform(const uint8_t *src, uint8_t *dst,
   config.scale_y = scale_y;
   config.rotation_angle = rotation;
 
+  // RGB/BGR swap - keep as BGR (display expects BGR format)
+  config.rgb_swap = false;
+  config.byte_swap = false;
+
   config.mode = PPA_TRANS_MODE_NON_BLOCKING;
   config.user_data = (void *)done_sem;
 

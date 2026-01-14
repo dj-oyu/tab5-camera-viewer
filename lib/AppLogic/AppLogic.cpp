@@ -1,20 +1,27 @@
 #include "AppLogic.h"
+#include "DisplayInit.h"
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <esp_lcd_mipi_dsi.h>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
 #define STACK_DEPTH 16384
 #define BITSTREAM_PAD 64
 
+// Forward declaration for DPI panel event callbacks
+extern "C" esp_err_t esp_lcd_dpi_panel_register_event_callbacks(
+    esp_lcd_panel_handle_t panel,
+    const esp_lcd_dpi_panel_event_callbacks_t *cbs,
+    void *user_ctx);
+
 uint32_t AppLogic::panel_h = 0;
 uint32_t AppLogic::panel_w = 0;
 
 QueueHandle_t AppLogic::frameQueue = nullptr;
+QueueHandle_t AppLogic::decodedFrameQueue = nullptr;
 QueueHandle_t AppLogic::linearFreeQueue = nullptr;
 esp_lcd_panel_handle_t AppLogic::panel_handle = nullptr;
 uint16_t *AppLogic::decode_bufs[2] = {nullptr, nullptr};
@@ -32,15 +39,15 @@ public:
 };
 
 void AppLogic::begin() {
+  // Initialize M5Unified for basic peripherals (touch, I2C, etc)
   auto cfg = M5.config();
+  cfg.output_power = true;
   M5.begin(cfg);
 
-  M5.Display.fillScreen(TFT_BLACK);
-  panel_h = M5.Display.height();
-  panel_w = M5.Display.width();
+  panel_w = 720;
+  panel_h = 1280;
 
-  // v63: PPA Hardware Scaling + Zero-copy chunked decoding
-  Serial.println("AppLogic v63 starting...");
+  Serial.println("AppLogic v64: Dual Framebuffer + PPA Zero-copy");
   Serial.printf("Panel: %dx%d\n", panel_w, panel_h);
 
   displayDoneSema = xSemaphoreCreateBinary();
@@ -55,8 +62,8 @@ void AppLogic::begin() {
 
   linearFreeQueue = xQueueCreate(2, sizeof(uint8_t *));
   frameQueue = xQueueCreate(2, sizeof(FrameData));
+  decodedFrameQueue = xQueueCreate(2, sizeof(DecodedFrameData));
 
-  // v60: Minimal safety margins
   ring_buf = (uint8_t *)heap_caps_aligned_alloc(
       64, RING_BUF_SIZE + 256, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
@@ -64,35 +71,48 @@ void AppLogic::begin() {
     linear_bufs[i] = (uint8_t *)heap_caps_aligned_alloc(
         64, LINEAR_BUF_SIZE + BITSTREAM_PAD + 64,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    uint8_t *ptr = linear_bufs[i];
-    xQueueSend(linearFreeQueue, &ptr, 0);
+    xQueueSend(linearFreeQueue, &linear_bufs[i], 0);
   }
 
-  // Get Panel Handle
+  // Get panel handle and framebuffer from M5Unified
   auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
   auto accessor = static_cast<Panel_DSI_Accessor *>(dsi);
   panel_handle = accessor->getHandle();
 
-  esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_color_trans_done =
-                                                 on_color_trans_done};
-  esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &cbs, NULL);
+  // Get framebuffer using esp_lcd_dpi_panel_get_frame_buffer
+  esp_lcd_dpi_panel_get_frame_buffer(panel_handle, 1, (void **)&fb);
 
-  auto detail = dsi->config_detail();
-  fb = (uint16_t *)detail.buffer;
+  if (fb == nullptr) {
+    Serial.println("Failed to get framebuffer, allocating dedicated buffer");
+    fb = (uint16_t *)heap_caps_aligned_alloc(
+        64, PANEL_WIDTH * PANEL_HEIGHT * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  }
+  Serial.printf("Framebuffer: %p\n", fb);
 
-  // Allocate decode buffers (size computed at compile time)
+  // Register DSI transfer done callback
+  esp_lcd_dpi_panel_event_callbacks_t cbs = {
+    .on_color_trans_done = on_color_trans_done,
+  };
+  esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &cbs, nullptr);
+  Serial.println("DSI transfer callback registered");
+
+  // Allocate dual decode buffers for parallel JPEG decode + PPA processing
   for (int i = 0; i < 2; i++) {
     decode_bufs[i] = (uint16_t *)heap_caps_aligned_alloc(
         64, DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    Serial.printf("Decode buffer[%d]: %p (size=%u)\n", i, decode_bufs[i], DECODE_BUF_SIZE);
+    if (decode_bufs[i] == nullptr) {
+      Serial.printf("FATAL: Failed to allocate decode buffer[%d]!\n", i);
+      while(1) vTaskDelay(1000);
+    }
   }
 
   vTaskDelay(1000);
 
-  // v61: Both on Core 1 (Shared Cache) at equal priority
-  xTaskCreatePinnedToCore(mjpegFetchTask, "Fetch", STACK_DEPTH, NULL, 5, NULL,
-                          1);
-  xTaskCreatePinnedToCore(mjpegRenderTask, "Render", STACK_DEPTH, NULL, 5, NULL,
-                          1);
+  // 3-stage pipeline: Fetch -> Decode -> Render (PPA+DSI)
+  xTaskCreatePinnedToCore(mjpegFetchTask, "Fetch", STACK_DEPTH, NULL, 6, NULL, 1);
+  xTaskCreatePinnedToCore(mjpegDecodeTask, "Decode", STACK_DEPTH, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(mjpegRenderTask, "Render", STACK_DEPTH, NULL, 5, NULL, 1);
 }
 
 void AppLogic::update() { M5.update(); }
@@ -135,14 +155,15 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
     http.setReuse(false);
     http.setTimeout(10000);
 
-    if (http.GET() != 200) {
-      Serial.println("HTTP GET failed");
+    int httpCode = http.GET();
+    if (httpCode != 200) {
+      Serial.printf("HTTP GET failed, code=%d\n", httpCode);
       http.end();
       vTaskDelay(1000);
       continue;
     }
 
-    // v62: Use auto& to avoid Stream alignment/type issues
+    Serial.println("Stream connected");
     auto &stream = http.getStream();
     stream.setTimeout(1000);
 
@@ -426,9 +447,8 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
 #endif
 }
 
-void AppLogic::mjpegRenderTask(void *pvParameters) {
-  uint32_t frame_count = 0;
-  uint32_t last_fps_time = millis();
+// Decode Task: JPEG decode only
+void AppLogic::mjpegDecodeTask(void *pvParameters) {
   jpeg_decoder_handle_t decoder = nullptr;
   jpeg_decode_engine_cfg_t eng_cfg = {.intr_priority = 0, .timeout_ms = 100};
   jpeg_decode_cfg_t dec_cfg = {
@@ -438,6 +458,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   };
 
   FrameData fd;
+
   while (1) {
     if (xQueueReceive(frameQueue, &fd, pdMS_TO_TICKS(1000)) == pdTRUE) {
       if (!decoder) {
@@ -451,17 +472,44 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
                       ESP_CACHE_MSYNC_FLAG_INVALIDATE);
       __asm__ __volatile__("fence" ::: "memory");
 
-      // Decode JPEG to decode_bufs (STREAM_WIDTH x STREAM_HEIGHT)
-      // Buffer size is compile-time constant DECODE_BUF_SIZE
+      // Decode JPEG to decode_bufs
+      int current_idx = decode_idx;
       jpeg_decoder_process(decoder, &dec_cfg, fd.buf, process_len,
-                           (uint8_t *)decode_bufs[decode_idx],
+                           (uint8_t *)decode_bufs[current_idx],
                            DECODE_BUF_SIZE, &out_size);
 
-      // Align out_size for cache operations
       size_t aligned_size = (out_size + 63) & ~63;
-      esp_cache_msync(decode_bufs[decode_idx], aligned_size,
+      esp_cache_msync(decode_bufs[current_idx], aligned_size,
                       ESP_CACHE_MSYNC_FLAG_DIR_M2C |
                       ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+
+      // Switch decode buffer for next frame
+      decode_idx ^= 1;
+
+      // Send decoded frame to render task
+      DecodedFrameData dfd;
+      dfd.buf_idx = current_idx;
+      dfd.linear_buf = fd.is_linear ? fd.buf : nullptr;
+      dfd.has_linear_buf = fd.is_linear;
+      xQueueSend(decodedFrameQueue, &dfd, portMAX_DELAY);
+    } else {
+      vTaskDelay(1);
+    }
+  }
+}
+
+// Render Task: PPA + DSI only
+void AppLogic::mjpegRenderTask(void *pvParameters) {
+  uint32_t frame_count = 0;
+  uint32_t last_fps_time = millis();
+  DecodedFrameData dfd;
+
+  while (1) {
+    if (xQueueReceive(decodedFrameQueue, &dfd, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      // Return linear buffer to fetch task
+      if (dfd.has_linear_buf) {
+        xQueueSend(linearFreeQueue, &dfd.linear_buf, 0);
+      }
 
       if (xSemaphoreTake(displayDoneSema, pdMS_TO_TICKS(500)) == pdTRUE) {
         // Calculate scaling to fit screen (compile-time constants)
@@ -491,15 +539,10 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
         if (scale > 4.0f) scale = 4.0f;
         if (scale < 0.125f) scale = 0.125f;
 
-        // Use alternate decode buffer as PPA output
-        int ppa_out_idx = decode_idx ^ 1;
-
-        // Clear output buffer to black (RGB565 0x0000) to avoid garbage in letterbox regions
-        memset(decode_bufs[ppa_out_idx], 0, DECODE_BUF_SIZE);
-
+        // PPA transforms directly to device framebuffer
         bool ppa_ok = PPAPipeline::transform(
-            (const uint8_t *)decode_bufs[decode_idx],
-            (uint8_t *)decode_bufs[ppa_out_idx],
+            (const uint8_t *)decode_bufs[dfd.buf_idx],
+            (uint8_t *)fb,
             STREAM_WIDTH, STREAM_HEIGHT,
             PANEL_WIDTH, PANEL_HEIGHT,
             PPA_SRM_COLOR_MODE_RGB565,
@@ -511,20 +554,11 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
 
         if (ppa_ok) {
           xSemaphoreTake(ppaDoneSema, portMAX_DELAY);
-          // PPA done, cache sync and send to DSI panel
-          constexpr size_t out_aligned = (PANEL_WIDTH * PANEL_HEIGHT * 2 + 63) & ~63;
-          esp_cache_msync(decode_bufs[ppa_out_idx], out_aligned,
-                         ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-
-          // Draw to panel (this triggers DSI transfer and displayDoneSema)
-          esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, PANEL_WIDTH, PANEL_HEIGHT,
-                                    decode_bufs[ppa_out_idx]);
+          esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, PANEL_WIDTH, PANEL_HEIGHT, fb);
         } else {
-          Serial.println("PPA transform failed!");
           xSemaphoreGive(displayDoneSema);
         }
 
-        decode_idx = ppa_out_idx;
         frame_count++;
         if (frame_count >= 100) {
           uint32_t now = millis();
@@ -534,12 +568,7 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
           frame_count = 0;
         }
       } else {
-        Serial.println("Renderer: DSI Timeout");
         xSemaphoreGive(displayDoneSema);
-      }
-
-      if (fd.is_linear) {
-        xQueueSend(linearFreeQueue, &fd.buf, 0);
       }
     } else {
       vTaskDelay(1);

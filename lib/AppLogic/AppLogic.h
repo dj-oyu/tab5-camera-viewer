@@ -14,7 +14,8 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-class AppLogic {
+class AppLogic
+{
 public:
   static void begin();
   static void update();
@@ -22,18 +23,28 @@ public:
 private:
   static void initWiFi();
   static void mjpegFetchTask(void *pvParameters);
+  static void mjpegDecodeTask(void *pvParameters);
   static void mjpegRenderTask(void *pvParameters);
   static bool on_color_trans_done(esp_lcd_panel_handle_t panel,
                                   esp_lcd_dpi_panel_event_data_t *edata,
                                   void *user_ctx);
 
-  struct FrameData {
+  struct FrameData
+  {
     uint8_t *buf;
     size_t len;
     bool is_linear; // If true, this buffer belongs to linearBuf pool
   };
 
+  struct DecodedFrameData
+  {
+    int buf_idx;         // Index of decode_bufs[] containing decoded RGB565 data
+    uint8_t *linear_buf; // Linear buffer to return (if is_linear was true)
+    bool has_linear_buf; // Whether linear_buf needs to be returned
+  };
+
   static QueueHandle_t frameQueue;
+  static QueueHandle_t decodedFrameQueue;
   static QueueHandle_t linearFreeQueue;
   static SemaphoreHandle_t displayDoneSema;
   static SemaphoreHandle_t ppaDoneSema;
@@ -56,11 +67,14 @@ private:
   // Compile-time buffer size calculation (max of stream and panel)
   static const uint32_t DECODE_BUF_SIZE =
       ((STREAM_WIDTH * STREAM_HEIGHT) > (PANEL_WIDTH * PANEL_HEIGHT)
-       ? (STREAM_WIDTH * STREAM_HEIGHT)
-       : (PANEL_WIDTH * PANEL_HEIGHT)) * 2;
+           ? (STREAM_WIDTH * STREAM_HEIGHT)
+           : (PANEL_WIDTH * PANEL_HEIGHT)) *
+      2;
 
   static const uint32_t RING_BUF_SIZE = 1024 * 1024;
   static const uint32_t LINEAR_BUF_SIZE = 256 * 1024;
+
+  static const int BG_COLOR = 0x8b008b;
 
   // Runtime panel size (for dynamic detection, usually matches constants)
   static uint32_t panel_h;
