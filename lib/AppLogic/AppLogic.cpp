@@ -142,10 +142,73 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
     uint32_t rb_tail = 0;
     uint32_t rb_parsed = 0;
 
-    enum ParseState { FIND_SOI, FETCH_JPEG };
+    enum ParseState { FIND_SOI, SCAN_CHUNK, COPY_MODE };
     ParseState state = FIND_SOI;
     uint8_t *active_lbuf = nullptr;
     uint32_t active_lptr = 0;
+
+    // chunkedエンコーディング処理用
+    enum ChunkedState { CHUNK_SIZE, CHUNK_DATA, CHUNK_TRAILER };
+    ChunkedState chunk_state = CHUNK_SIZE;
+    uint32_t chunk_remaining = 0;
+    uint32_t chunk_data_start = 0; // 現在のチャンクデータ開始位置
+    char chunk_size_buf[16];
+    uint8_t chunk_size_idx = 0;
+    bool seen_cr = false;
+
+    // ゼロコピー用
+    uint32_t frame_start_pos = 0;
+    bool needs_copy = false;
+
+    // chunkedレイヤー処理: ring_bufferの生データを解析してチャンクを追跡
+    auto processChunkedLayer = [&]() {
+      while (((rb_head - rb_tail) & RB_MASK) > 0) {
+        uint8_t raw = ring_buf[rb_tail & RB_MASK];
+
+        switch (chunk_state) {
+        case CHUNK_SIZE:
+          rb_tail = (rb_tail + 1) & RB_MASK;
+          if (raw == '\r') {
+            // \rをスキップ
+          } else if (raw == '\n') {
+            chunk_size_buf[chunk_size_idx] = '\0';
+            if (chunk_size_idx > 0) {
+              chunk_remaining = strtoul(chunk_size_buf, nullptr, 16);
+              chunk_size_idx = 0;
+              if (chunk_remaining == 0) {
+                return false; // 終了チャンク
+              }
+              chunk_data_start = rb_tail;
+              chunk_state = CHUNK_DATA;
+              return true;
+            }
+          } else if ((raw >= '0' && raw <= '9') ||
+                     (raw >= 'a' && raw <= 'f') ||
+                     (raw >= 'A' && raw <= 'F')) {
+            if (chunk_size_idx < 15) {
+              chunk_size_buf[chunk_size_idx++] = raw;
+            }
+          }
+          break;
+
+        case CHUNK_DATA:
+          // データは消費しない、rb_tailはそのまま
+          return true;
+
+        case CHUNK_TRAILER:
+          rb_tail = (rb_tail + 1) & RB_MASK;
+          if (raw == '\r') {
+            seen_cr = true;
+          } else if (raw == '\n' && seen_cr) {
+            chunk_state = CHUNK_SIZE;
+            seen_cr = false;
+            return true;
+          }
+          break;
+        }
+      }
+      return false;
+    };
 
     while (http.connected()) {
       bool made_progress = false;
@@ -173,56 +236,158 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
         }
       }
 
-      // 2. State Machine
-      while (((rb_head - rb_parsed) & RB_MASK) > 0) {
-        uint8_t b = ring_buf[rb_parsed & RB_MASK];
+      // 2. Chunkedレイヤー処理
+      processChunkedLayer();
 
-        if (state == FIND_SOI) {
-          if (b == 0xFF && ((rb_head - rb_parsed) & RB_MASK) >= 2) {
-            if (ring_buf[(rb_parsed + 1) & RB_MASK] == 0xD8) {
-              if (xQueueReceive(linearFreeQueue, &active_lbuf, 0) == pdTRUE) {
-                active_lptr = 0;
-                active_lbuf[active_lptr++] = 0xFF;
-                active_lbuf[active_lptr++] = 0xD8;
-                rb_parsed = (rb_parsed + 2) & RB_MASK;
-                state = FETCH_JPEG;
-                made_progress = true;
-                continue;
+      // 3. State Machine（ゼロコピー最適化版）
+      if (chunk_state == CHUNK_DATA && chunk_remaining > 0) {
+        uint32_t available = std::min(chunk_remaining,
+                                      (rb_head - rb_tail) & RB_MASK);
+        if (available == 0) {
+          // データ待ち
+        } else if (state == FIND_SOI) {
+          // SOIを探索
+          for (uint32_t i = 0; i < available - 1; i++) {
+            uint32_t pos = (rb_tail + i) & RB_MASK;
+            if (ring_buf[pos] == 0xFF && ring_buf[(pos + 1) & RB_MASK] == 0xD8) {
+              frame_start_pos = pos;
+              rb_parsed = (pos + 2) & RB_MASK;
+              rb_tail = rb_parsed;
+              chunk_remaining -= (i + 2);
+              state = SCAN_CHUNK;
+              needs_copy = false;
+              made_progress = true;
+              break;
+            }
+          }
+          if (state == FIND_SOI) {
+            // SOI未発見、データを破棄
+            rb_tail = (rb_tail + available) & RB_MASK;
+            chunk_remaining -= available;
+            if (chunk_remaining == 0) {
+              chunk_state = CHUNK_TRAILER;
+              seen_cr = false;
+            }
+          }
+        } else if (state == SCAN_CHUNK) {
+          // chunk内でEOIを探索（ゼロコピー判定）
+          uint32_t scan_end = rb_tail + available;
+          for (uint32_t i = 0; i < available - 1; i++) {
+            uint32_t pos = (rb_tail + i) & RB_MASK;
+            if (ring_buf[pos] == 0xFF && ring_buf[(pos + 1) & RB_MASK] == 0xD9) {
+              // EOI発見: chunk内完結 -> ゼロコピー可能
+              uint32_t frame_len = ((pos + 2) - frame_start_pos) & RB_MASK;
+
+              // Ring bufferが連続領域か確認
+              if (frame_start_pos + frame_len <= RING_BUF_SIZE) {
+                // 連続領域 -> ゼロコピー
+                size_t pad_len = (frame_len + BITSTREAM_PAD + 63) & ~63;
+                if (frame_start_pos + pad_len <= RING_BUF_SIZE) {
+                  memset(ring_buf + frame_start_pos + frame_len, 0,
+                         pad_len - frame_len);
+                  esp_cache_msync((void *)(ring_buf + frame_start_pos), pad_len,
+                                  ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+                  FrameData fd;
+                  fd.buf = ring_buf + frame_start_pos;
+                  fd.len = frame_len;
+                  fd.is_linear = false; // Ring buffer参照
+                  xQueueSend(frameQueue, &fd, 0);
+                  last_sub_time = millis();
+
+                  rb_tail = (pos + 2) & RB_MASK;
+                  rb_parsed = rb_tail;
+                  chunk_remaining -= (i + 2);
+                  state = FIND_SOI;
+                  made_progress = true;
+                  break;
+                }
+              }
+
+              // ゼロコピー不可 -> コピーモードへ
+              needs_copy = true;
+              state = COPY_MODE;
+              break;
+            }
+          }
+
+          if (state == SCAN_CHUNK) {
+            // EOI未発見
+            rb_tail = (rb_tail + available) & RB_MASK;
+            rb_parsed = rb_tail;
+            chunk_remaining -= available;
+            if (chunk_remaining == 0) {
+              // Chunk終了、次のchunkにまたがる -> コピーモード
+              needs_copy = true;
+              state = COPY_MODE;
+              chunk_state = CHUNK_TRAILER;
+              seen_cr = false;
+            }
+          }
+        }
+
+        if (state == COPY_MODE) {
+          // Linear bufferにコピー
+          if (!active_lbuf) {
+            if (xQueueReceive(linearFreeQueue, &active_lbuf, 0) != pdTRUE) {
+              // バッファなし、次回まで待機
+            } else {
+              active_lptr = 0;
+              // フレーム開始位置からコピー
+              uint32_t copy_len = (rb_parsed - frame_start_pos) & RB_MASK;
+              for (uint32_t i = 0; i < copy_len; i++) {
+                active_lbuf[active_lptr++] = ring_buf[(frame_start_pos + i) & RB_MASK];
               }
             }
           }
-          rb_parsed = (rb_parsed + 1) & RB_MASK;
-          rb_tail = rb_parsed;
-          made_progress = true;
-        } else if (state == FETCH_JPEG) {
-          if (active_lptr < LINEAR_BUF_SIZE) {
-            active_lbuf[active_lptr++] = b;
-            rb_parsed = (rb_parsed + 1) & RB_MASK;
-            made_progress = true;
 
-            if (active_lptr >= 2 && active_lbuf[active_lptr - 2] == 0xFF &&
-                active_lbuf[active_lptr - 1] == 0xD9) {
-              size_t l_pad = (active_lptr + BITSTREAM_PAD + 63) & ~63;
-              memset(active_lbuf + active_lptr, 0, l_pad - active_lptr);
-              esp_cache_msync((void *)active_lbuf, l_pad,
-                              ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+          if (active_lbuf) {
+            // 継続してコピー
+            while (chunk_state == CHUNK_DATA && chunk_remaining > 0 &&
+                   ((rb_head - rb_tail) & RB_MASK) > 0 && active_lptr < LINEAR_BUF_SIZE) {
+              uint8_t b = ring_buf[rb_tail & RB_MASK];
+              rb_tail = (rb_tail + 1) & RB_MASK;
+              chunk_remaining--;
+              active_lbuf[active_lptr++] = b;
+              made_progress = true;
 
-              FrameData fd;
-              fd.buf = active_lbuf;
-              fd.len = active_lptr;
-              fd.is_linear = true;
-              xQueueSend(frameQueue, &fd, 0);
-              last_sub_time = millis();
+              if (active_lptr >= 2 && active_lbuf[active_lptr - 2] == 0xFF &&
+                  active_lbuf[active_lptr - 1] == 0xD9) {
+                // EOI発見
+                size_t l_pad = (active_lptr + BITSTREAM_PAD + 63) & ~63;
+                memset(active_lbuf + active_lptr, 0, l_pad - active_lptr);
+                esp_cache_msync((void *)active_lbuf, l_pad,
+                                ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
-              rb_tail = rb_parsed;
+                FrameData fd;
+                fd.buf = active_lbuf;
+                fd.len = active_lptr;
+                fd.is_linear = true;
+                xQueueSend(frameQueue, &fd, 0);
+                last_sub_time = millis();
+
+                active_lbuf = nullptr;
+                rb_parsed = rb_tail;
+                state = FIND_SOI;
+                if (chunk_remaining == 0) {
+                  chunk_state = CHUNK_TRAILER;
+                  seen_cr = false;
+                }
+                break;
+              }
+            }
+
+            if (chunk_remaining == 0 && chunk_state == CHUNK_DATA) {
+              chunk_state = CHUNK_TRAILER;
+              seen_cr = false;
+            }
+
+            if (active_lptr >= LINEAR_BUF_SIZE) {
+              Serial.println("Fetcher: Linear Overflow!");
+              xQueueSend(linearFreeQueue, &active_lbuf, 0);
               active_lbuf = nullptr;
               state = FIND_SOI;
             }
-          } else {
-            Serial.println("Fetcher: Linear Overflow!");
-            xQueueSend(linearFreeQueue, &active_lbuf, 0);
-            active_lbuf = nullptr;
-            state = FIND_SOI;
           }
         }
       }
