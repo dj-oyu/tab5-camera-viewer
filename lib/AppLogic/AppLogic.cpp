@@ -23,6 +23,7 @@ uint16_t *AppLogic::fb = nullptr;
 uint8_t *AppLogic::ring_buf = nullptr;
 uint8_t *AppLogic::linear_bufs[2] = {nullptr, nullptr};
 SemaphoreHandle_t AppLogic::displayDoneSema = nullptr;
+SemaphoreHandle_t AppLogic::ppaDoneSema = nullptr;
 
 // Helper class to access protected member
 class Panel_DSI_Accessor : public lgfx::Panel_DSI {
@@ -38,11 +39,19 @@ void AppLogic::begin() {
   panel_h = M5.Display.height();
   panel_w = M5.Display.width();
 
-  // v62: Smart-Staging MJPEG (Strategy B)
-  Serial.println("AppLogic v62 starting...");
+  // v63: PPA Hardware Scaling + Zero-copy chunked decoding
+  Serial.println("AppLogic v63 starting...");
+  Serial.printf("Panel: %dx%d\n", panel_w, panel_h);
 
   displayDoneSema = xSemaphoreCreateBinary();
   xSemaphoreGive(displayDoneSema);
+
+  ppaDoneSema = xSemaphoreCreateBinary();
+
+  // Initialize PPA Pipeline
+  if (!PPAPipeline::begin()) {
+    Serial.println("Failed to initialize PPA Pipeline!");
+  }
 
   linearFreeQueue = xQueueCreate(2, sizeof(uint8_t *));
   frameQueue = xQueueCreate(2, sizeof(FrameData));
@@ -71,9 +80,10 @@ void AppLogic::begin() {
   auto detail = dsi->config_detail();
   fb = (uint16_t *)detail.buffer;
 
+  // Allocate decode buffers (size computed at compile time)
   for (int i = 0; i < 2; i++) {
     decode_bufs[i] = (uint16_t *)heap_caps_aligned_alloc(
-        64, panel_w * panel_h * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        64, DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   }
 
   vTaskDelay(1000);
@@ -441,15 +451,80 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
                       ESP_CACHE_MSYNC_FLAG_INVALIDATE);
       __asm__ __volatile__("fence" ::: "memory");
 
+      // Decode JPEG to decode_bufs (STREAM_WIDTH x STREAM_HEIGHT)
+      // Buffer size is compile-time constant DECODE_BUF_SIZE
+      jpeg_decoder_process(decoder, &dec_cfg, fd.buf, process_len,
+                           (uint8_t *)decode_bufs[decode_idx],
+                           DECODE_BUF_SIZE, &out_size);
+
+      // Align out_size for cache operations
+      size_t aligned_size = (out_size + 63) & ~63;
+      esp_cache_msync(decode_bufs[decode_idx], aligned_size,
+                      ESP_CACHE_MSYNC_FLAG_DIR_M2C |
+                      ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+
       if (xSemaphoreTake(displayDoneSema, pdMS_TO_TICKS(500)) == pdTRUE) {
-        jpeg_decoder_process(decoder, &dec_cfg, fd.buf, process_len,
-                             (uint8_t *)decode_bufs[decode_idx],
-                             panel_w * panel_h * 2, &out_size);
+        // Calculate scaling to fit screen (compile-time constants)
+        constexpr float scale_x = (float)PANEL_WIDTH / STREAM_WIDTH;
+        constexpr float scale_y = (float)PANEL_HEIGHT / STREAM_HEIGHT;
+        constexpr float base_scale = scale_x < scale_y ? scale_x : scale_y;
 
-        esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, STREAM_WIDTH,
-                                  STREAM_HEIGHT, decode_bufs[decode_idx]);
+        // Check if rotation is needed (compile-time)
+        constexpr bool panel_is_portrait = PANEL_HEIGHT > PANEL_WIDTH;
+        constexpr bool stream_is_landscape = STREAM_WIDTH > STREAM_HEIGHT;
 
-        decode_idx ^= 1;
+        ppa_srm_rotation_angle_t rotation;
+        float scale;
+
+        if constexpr (panel_is_portrait && stream_is_landscape) {
+          rotation = PPA_SRM_ROTATION_ANGLE_90;
+          // After rotation, stream becomes portrait (480x640)
+          constexpr float rot_scale_x = (float)PANEL_WIDTH / STREAM_HEIGHT;
+          constexpr float rot_scale_y = (float)PANEL_HEIGHT / STREAM_WIDTH;
+          scale = rot_scale_x < rot_scale_y ? rot_scale_x : rot_scale_y;
+        } else {
+          rotation = PPA_SRM_ROTATION_ANGLE_0;
+          scale = base_scale;
+        }
+
+        // Clamp scale to PPA limitations
+        if (scale > 4.0f) scale = 4.0f;
+        if (scale < 0.125f) scale = 0.125f;
+
+        // Use alternate decode buffer as PPA output
+        int ppa_out_idx = decode_idx ^ 1;
+
+        // Clear output buffer to black (RGB565 0x0000) to avoid garbage in letterbox regions
+        memset(decode_bufs[ppa_out_idx], 0, DECODE_BUF_SIZE);
+
+        bool ppa_ok = PPAPipeline::transform(
+            (const uint8_t *)decode_bufs[decode_idx],
+            (uint8_t *)decode_bufs[ppa_out_idx],
+            STREAM_WIDTH, STREAM_HEIGHT,
+            PANEL_WIDTH, PANEL_HEIGHT,
+            PPA_SRM_COLOR_MODE_RGB565,
+            PPA_SRM_COLOR_MODE_RGB565,
+            rotation,
+            scale, scale,
+            ppaDoneSema
+        );
+
+        if (ppa_ok) {
+          xSemaphoreTake(ppaDoneSema, portMAX_DELAY);
+          // PPA done, cache sync and send to DSI panel
+          constexpr size_t out_aligned = (PANEL_WIDTH * PANEL_HEIGHT * 2 + 63) & ~63;
+          esp_cache_msync(decode_bufs[ppa_out_idx], out_aligned,
+                         ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+          // Draw to panel (this triggers DSI transfer and displayDoneSema)
+          esp_lcd_panel_draw_bitmap(panel_handle, 0, 0, PANEL_WIDTH, PANEL_HEIGHT,
+                                    decode_bufs[ppa_out_idx]);
+        } else {
+          Serial.println("PPA transform failed!");
+          xSemaphoreGive(displayDoneSema);
+        }
+
+        decode_idx = ppa_out_idx;
         frame_count++;
         if (frame_count >= 100) {
           uint32_t now = millis();
