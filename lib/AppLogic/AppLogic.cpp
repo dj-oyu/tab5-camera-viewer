@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <esp_lcd_mipi_dsi.h>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
 #define STACK_DEPTH 8192
@@ -15,13 +16,13 @@ uint32_t AppLogic::panel_w = 0;
 QueueHandle_t AppLogic::frameQueue = nullptr;
 QueueHandle_t AppLogic::linearFreeQueue = nullptr;
 QueueHandle_t AppLogic::rbReleaseQueue = nullptr;
-SemaphoreHandle_t AppLogic::renderReadySema = nullptr;
 esp_lcd_panel_handle_t AppLogic::panel_handle = nullptr;
 uint16_t *AppLogic::decode_bufs[2] = {nullptr, nullptr};
 int AppLogic::decode_idx = 0;
 uint16_t *AppLogic::fb = nullptr;
 uint8_t *AppLogic::ring_buf = nullptr;
 uint8_t *AppLogic::linear_bufs[2] = {nullptr, nullptr};
+SemaphoreHandle_t AppLogic::displayDoneSema = nullptr;
 
 // Helper class to access protected member
 class Panel_DSI_Accessor : public lgfx::Panel_DSI {
@@ -37,14 +38,15 @@ void AppLogic::begin() {
   panel_h = M5.Display.height();
   panel_w = M5.Display.width();
 
-  M5.Display.println("MJPEG Profiling Mode v4...");
-  Serial.println("AppLogic v4 starting...");
+  M5.Display.println("MJPEG Profiling Mode v29 (Cache Aligned)...");
+  Serial.println("AppLogic v29 starting...");
+
+  displayDoneSema = xSemaphoreCreateBinary();
+  xSemaphoreGive(displayDoneSema);
 
   linearFreeQueue = xQueueCreate(2, sizeof(uint8_t *));
   frameQueue = xQueueCreate(2, sizeof(FrameData));
   rbReleaseQueue = xQueueCreate(64, sizeof(size_t));
-  renderReadySema = xSemaphoreCreateBinary();
-  xSemaphoreGive(renderReadySema);
 
   // Add padding for safe cache sync beyond buffer end
   ring_buf = (uint8_t *)heap_caps_aligned_alloc(
@@ -62,6 +64,10 @@ void AppLogic::begin() {
   auto accessor = static_cast<Panel_DSI_Accessor *>(dsi);
   panel_handle = accessor->getHandle();
 
+  esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_color_trans_done =
+                                                 on_color_trans_done};
+  esp_lcd_dpi_panel_register_event_callbacks(panel_handle, &cbs, NULL);
+
   auto detail = dsi->config_detail();
   fb = (uint16_t *)detail.buffer;
 
@@ -72,13 +78,26 @@ void AppLogic::begin() {
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   }
 
+  // v27: Wait for DSI/DMA2D hardware to fully stabilize before starting tasks
+  vTaskDelay(500);
+
   xTaskCreatePinnedToCore(mjpegFetchTask, "Fetch", STACK_DEPTH, NULL, 5, NULL,
-                          0);
+                          1);
   xTaskCreatePinnedToCore(mjpegRenderTask, "Render", STACK_DEPTH, NULL, 5, NULL,
                           1);
 }
 
 void AppLogic::update() { M5.update(); }
+
+bool IRAM_ATTR AppLogic::on_color_trans_done(
+    esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata,
+    void *user_ctx) {
+  BaseType_t high_priority_task_awoken = pdFALSE;
+  if (displayDoneSema) {
+    xSemaphoreGiveFromISR(displayDoneSema, &high_priority_task_awoken);
+  }
+  return high_priority_task_awoken == pdTRUE;
+}
 
 void AppLogic::initWiFi() {
 #ifdef WIFI_SSID
@@ -201,92 +220,142 @@ void AppLogic::mjpegFetchTask(void *pvParameters) {
               }
               searched_len = len;
 
+              // v28: Guaranteed 128-byte Lookahead for EOI detection
               if (found_eoi || found_next_soi) {
-                fdPending.len = len;
-                bool is_contiguous = (rb_parsed + len <= RING_BUF_SIZE);
+                // v28: Need 128B margin after frame for HW DMA lookahead
+                uint32_t needed_margin = 128;
+                bool is_contiguous =
+                    (rb_parsed + len + needed_margin <= RING_BUF_SIZE);
+                bool has_margins =
+                    ((rb_head - (rb_parsed + len)) & RB_MASK) >= needed_margin;
+                // v29: Strict 64-byte alignment requirement for cache sync
                 bool is_aligned = (((uintptr_t)&ring_buf[rb_parsed] & 63) == 0);
 
-                if (is_contiguous && is_aligned && !found_next_soi) {
+                if (is_contiguous && has_margins && is_aligned &&
+                    !found_next_soi) {
+                  // Zero-copy path: directly reference Ring Buffer
                   fdPending.buf = &ring_buf[rb_parsed];
+                  fdPending.len =
+                      len; // Renderer will use process_len = len + 128
                   fdPending.is_linear = false;
-                  size_t aligned_len = (fdPending.len + 63) & ~63;
-                  esp_cache_msync(fdPending.buf, aligned_len,
+                  // Sync frame + lookahead margin (must be 64-aligned size)
+                  esp_cache_msync(fdPending.buf, (len + 128 + 63) & ~63,
                                   ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                   pendingFrame = true;
-                  rb_parsed = (rb_parsed + len) & RB_MASK;
-                  searched_len = 0;
                 } else {
+                  // Linear copy path: for wrapped or unaligned frames
                   uint8_t *lbuf = nullptr;
                   if (xQueueReceive(linearFreeQueue, &lbuf, 0) == pdTRUE) {
-                    if (is_contiguous) {
+                    if (rb_parsed + len <= RING_BUF_SIZE) {
                       memcpy(lbuf, &ring_buf[rb_parsed], len);
                     } else {
                       uint32_t f1 = RING_BUF_SIZE - rb_parsed;
                       memcpy(lbuf, &ring_buf[rb_parsed], f1);
                       memcpy(lbuf + f1, &ring_buf[0], len - f1);
                     }
-                    if (found_next_soi && len <= LINEAR_BUF_SIZE - 2) {
-                      lbuf[len++] = 0xFF;
-                      lbuf[len++] = 0xD9;
+
+                    uint32_t bitstream_len = len;
+                    if (found_next_soi) {
+                      lbuf[bitstream_len++] = 0xFF;
+                      lbuf[bitstream_len++] = 0xD9;
                     }
+
+                    // v28: Append 128 bytes of 0xFF for lookahead safety
+                    uint32_t padded_total = (bitstream_len + 128 + 63) & ~63;
+                    memset(lbuf + bitstream_len, 0xFF,
+                           padded_total - bitstream_len);
+
                     fdPending.buf = lbuf;
-                    fdPending.len = len;
+                    fdPending.len = bitstream_len;
                     fdPending.is_linear = true;
-                    size_t aligned_len = (len + 63) & ~63;
-                    esp_cache_msync(lbuf, aligned_len,
+                    esp_cache_msync(lbuf, padded_total,
                                     ESP_CACHE_MSYNC_FLAG_DIR_C2M);
                     pendingFrame = true;
-                    uint32_t raw_len = found_next_soi ? (len - 2) : len;
-                    rb_parsed = (rb_parsed + raw_len) & RB_MASK;
-                    xQueueSend(rbReleaseQueue, &raw_len, 0);
-                    searched_len = 0;
+                  }
+                }
+
+                if (pendingFrame) {
+                  rb_parsed = (rb_parsed + len) & RB_MASK;
+                  if (fdPending.is_linear) {
+                    xQueueSend(rbReleaseQueue, &len, 0);
+                  }
+                  searched_len = 0;
+
+                  frame_count++;
+                  if (frame_count >= 100) {
+                    uint32_t now = millis();
+                    float fps = 100000.0f / (now - last_fps_time);
+                    Serial.printf("Fetcher FPS: %.1f, Len: %u, ZC: %d\n", fps,
+                                  len, !fdPending.is_linear);
+                    frame_count = 0;
+                    last_fps_time = now;
                   }
                 }
               }
             }
           }
-          if (rb_fill >= RING_BUF_SIZE - 8192) {
-            uint32_t skip = 4096;
-            rb_parsed = (rb_parsed + skip) & RB_MASK;
-            xQueueSend(rbReleaseQueue, &skip, 0);
-            searched_len = 0;
-          }
         }
-
-        // 4. Dispatch Frame
-        if (pendingFrame) {
-          if (xSemaphoreTake(renderReadySema, 0) == pdTRUE) {
-            if (xQueueSend(frameQueue, &fdPending, 0) == pdTRUE) {
-              pendingFrame = false;
-              frame_count++;
-              if (frame_count >= 100) {
-                uint32_t now = millis();
-                float fps = 100000.0f / (now - last_fps_time);
-                Serial.printf("FPS: %.1f\n", fps);
-                frame_count = 0;
-                last_fps_time = now;
-              }
+        // v17: Emergency Frame Recovery
+        // If buffer is nearly full and we haven't found a
+        // frame,強制的にスキップ
+        uint32_t rb_fill = (rb_head - rb_tail) & RB_MASK;
+        if (rb_fill >= RING_BUF_SIZE - 32768) {
+          uint32_t skipped = 0;
+          uint32_t btp = (rb_head - rb_parsed) & RB_MASK;
+          while (btp >= 2 && skipped < 16384) { // Look for SOI
+            if (ring_buf[rb_parsed] == 0xFF &&
+                ring_buf[(rb_parsed + 1) & RB_MASK] == 0xD8)
+              break;
+            rb_parsed = (rb_parsed + 1) & RB_MASK;
+            btp--;
+            skipped++;
+          }
+          if (skipped > 0) {
+            if (btp < 2) { // No SOI found, just clear 16KB
+              rb_parsed = (rb_parsed + 16384) & RB_MASK;
+              uint32_t force_skip = 16384;
+              xQueueSend(rbReleaseQueue, &force_skip, 0);
             } else {
-              xSemaphoreGive(renderReadySema);
+              xQueueSend(rbReleaseQueue, &skipped, 0);
             }
           }
+          searched_len = 0;
         }
-        if ((avail <= 0) || pendingFrame) {
-          vTaskDelay(1);
+        if (pendingFrame) {
+          if (xQueueSend(frameQueue, &fdPending, 0) == pdTRUE) {
+            pendingFrame = false;
+          }
         }
+        // v17: Mandatory yield to satisfy Task Watchdog on Core 0
+        vTaskDelay(1);
       }
+
       http.end();
       vTaskDelay(1000);
     }
-#endif
   }
+#endif
 }
 
 void AppLogic::mjpegRenderTask(void *pvParameters) {
-  jpeg_decoder_handle_t decoder;
+  uint32_t frame_count = 0;
+  uint32_t last_fps_time = millis();
+  uint32_t consecutive_errors = 0;
+  jpeg_decoder_handle_t decoder = nullptr;
   jpeg_decode_engine_cfg_t eng_cfg = {.intr_priority = 0, .timeout_ms = 100};
-  if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK) {
-  }
+
+  auto create_engine = [&]() {
+    if (decoder)
+      jpeg_del_decoder_engine(decoder);
+    if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK) {
+      Serial.println("Failed to create JPEG decoder engine");
+      return false;
+    }
+    return true;
+  };
+
+  if (!create_engine())
+    return;
 
   jpeg_decode_cfg_t dec_cfg = {
       .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
@@ -299,20 +368,38 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
   uint32_t y_offset = (panel_h - STREAM_HEIGHT) / 2;
 
   while (1) {
-    if (xQueueReceive(frameQueue, &fd, portMAX_DELAY) == pdTRUE) {
-      uint32_t out_size;
+    if (xQueueReceive(frameQueue, &fd, pdMS_TO_TICKS(500)) == pdTRUE) {
+      uint32_t out_size = 0;
 
-      // Decode into the current double-buffer
-      // Pass a slightly larger length (padded) to prevent HW decoder from
-      // complaining about missing EOI if it performs look-ahead near the
-      // buffer end.
-      size_t padded_len = (fd.len + 63) & ~63;
-      if (jpeg_decoder_process(decoder, &dec_cfg, fd.buf, fd.len,
+      // v19: Deadlock Resolution
+      // Use timeout to prevent permanent hang if callback is missed
+      if (xSemaphoreTake(displayDoneSema, pdMS_TO_TICKS(500)) != pdTRUE) {
+        Serial.println("Renderer: Display Deadlock! Force recovery...");
+        xSemaphoreGive(displayDoneSema);
+        xSemaphoreTake(displayDoneSema, 0);
+      }
+      uint32_t t_start = esp_timer_get_time();
+
+      // v28: Robust Lookahead (Frame + 128B) to satisfy HW DMA
+      size_t process_len = fd.len + 128;
+
+      if (jpeg_decoder_process(decoder, &dec_cfg, fd.buf, process_len,
                                (uint8_t *)decode_bufs[decode_idx],
                                STREAM_WIDTH * STREAM_HEIGHT * 2,
                                &out_size) == ESP_OK) {
 
-        // Release input buffer so Fetcher can continue
+        uint32_t t_dec = esp_timer_get_time();
+
+        frame_count++;
+        if (frame_count >= 100) {
+          uint32_t now = millis();
+          float fps = 100000.0f / (now - last_fps_time);
+          Serial.printf("Render FPS: %.1f\n", fps);
+          frame_count = 0;
+          last_fps_time = now;
+        }
+
+        // Release input buffer early
         if (fd.is_linear) {
           xQueueSend(linearFreeQueue, &fd.buf, 0);
         } else {
@@ -321,40 +408,57 @@ void AppLogic::mjpegRenderTask(void *pvParameters) {
 
         // Cache Sync: decode_bufs was written by HW (Jpeg).
         // Manually align up out_size.
-        size_t aligned_len = (out_size + 63) & ~63;
-        esp_cache_msync(decode_bufs[decode_idx], aligned_len,
+        size_t aligned_out = (out_size + 63) & ~63;
+        esp_cache_msync(decode_bufs[decode_idx], aligned_out,
                         ESP_CACHE_MSYNC_FLAG_DIR_M2C |
                             ESP_CACHE_MSYNC_FLAG_INVALIDATE);
 
-        // Draw to Panel using IDF API
-        if (panel_handle) {
-          esp_err_t ret;
-          // Retry loop for non-blocking API
-          do {
-            ret = esp_lcd_panel_draw_bitmap(
-                panel_handle, x_offset, y_offset, x_offset + STREAM_WIDTH,
-                y_offset + STREAM_HEIGHT, decode_bufs[decode_idx]);
-            if (ret != ESP_OK) {
-              vTaskDelay(1);
-            }
-          } while (ret != ESP_OK);
+        // v18: Pure IDF Rendering bypassing LGFX
+        // This is non-blocking; we wait for displayDoneSema at the start of
+        // next loop.
+        esp_lcd_panel_draw_bitmap(
+            panel_handle, x_offset, y_offset, x_offset + STREAM_WIDTH,
+            y_offset + STREAM_HEIGHT, decode_bufs[decode_idx]);
+
+        uint32_t t_draw = esp_timer_get_time();
+        if (frame_count == 1) { // Log once every 100 frames
+          Serial.printf("Timing: Dec %uus, Draw %uus\n",
+                        (uint32_t)(t_dec - t_start),
+                        (uint32_t)(t_draw - t_dec));
         }
 
         // Swap decode buffer (Bitwise optimization)
         decode_idx ^= 1;
+        taskYIELD();
 
       } else {
-        // Handle decode fail
+        Serial.printf("Decode Error for len %u\n", fd.len);
+        // v19: Release semaphore even on error, otherwise next loop deadlocks
+        xSemaphoreGive(displayDoneSema);
+        // v26: Optimization: Don't create_engine on single errors.
+        consecutive_errors++;
+        vTaskDelay(5); // v28: Allow DMA2D FSM to clear
+        if (consecutive_errors > 10) {
+          Serial.println(
+              "Watchdog: Persistent Decode Errors. Resetting Engine...");
+          create_engine();
+          consecutive_errors = 0;
+        }
+        // Release buffer even on error
         if (fd.is_linear) {
           xQueueSend(linearFreeQueue, &fd.buf, 0);
         } else {
           xQueueSend(rbReleaseQueue, &fd.len, 0);
         }
       }
-
-      // Signal Fetcher
-      xSemaphoreGive(renderReadySema);
+    } else {
+      // Renderer Stall Warning (v16)
+      // If we wait >500ms for a frame, something is wrong in the fetcher or
+      // network.
+      Serial.println("Renderer: Frame Timeout (500ms). Stall detected.");
     }
+
+    // Signal Fetcher loop is not needed as we use linearFreeQueue
     taskYIELD();
   }
 }
