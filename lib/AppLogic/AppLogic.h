@@ -13,7 +13,6 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-
 class AppLogic {
 public:
   static void begin();
@@ -35,7 +34,6 @@ private:
 
   static QueueHandle_t frameQueue;
   static QueueHandle_t linearFreeQueue;
-  static QueueHandle_t rbReleaseQueue;
   static SemaphoreHandle_t displayDoneSema;
   static esp_lcd_panel_handle_t panel_handle;
   static uint16_t *decode_bufs[2];
@@ -46,8 +44,8 @@ private:
 
   static const uint32_t STREAM_WIDTH = 640;
   static const uint32_t STREAM_HEIGHT = 480;
-  static const uint32_t RING_BUF_SIZE = 2 * 1024 * 1024;
-  static const uint32_t LINEAR_BUF_SIZE = 512 * 1024;
+  static const uint32_t RING_BUF_SIZE = 1024 * 1024;
+  static const uint32_t LINEAR_BUF_SIZE = 256 * 1024;
   static uint32_t panel_h;
   static uint32_t panel_w;
 };
