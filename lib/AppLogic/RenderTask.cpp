@@ -64,9 +64,13 @@ void renderTask(void *pvParameters) {
             scale, scale, ctx->ppaDoneSema());
 
         if (ppa_ok) {
-          xSemaphoreTake(ctx->ppaDoneSema(), portMAX_DELAY);
-          esp_lcd_panel_draw_bitmap(ctx->panelHandle(), 0, 0, PANEL_WIDTH,
-                                    PANEL_HEIGHT, ctx->framebuffer());
+          if (xSemaphoreTake(ctx->ppaDoneSema(), pdMS_TO_TICKS(100)) == pdTRUE) {
+            esp_lcd_panel_draw_bitmap(ctx->panelHandle(), 0, 0, PANEL_WIDTH,
+                                      PANEL_HEIGHT, ctx->framebuffer());
+          } else {
+            Serial.println("Render: PPA timeout");
+            xSemaphoreGive(ctx->displayDoneSema());
+          }
         } else {
           xSemaphoreGive(ctx->displayDoneSema());
         }

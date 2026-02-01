@@ -18,7 +18,7 @@ bool PipelineContext::init() {
 
   linear_free_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(uint8_t *));
   frame_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(FrameData));
-  decoded_frame_queue_ = xQueueCreate(2, sizeof(DecodedFrameData));
+  decoded_frame_queue_ = xQueueCreate(3, sizeof(DecodedFrameData));
   if (!linear_free_queue_ || !frame_queue_ || !decoded_frame_queue_) {
     Serial.println("Failed to create queues");
     return false;

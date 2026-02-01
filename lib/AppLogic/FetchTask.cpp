@@ -209,7 +209,7 @@ void fetchTask(void *pvParameters) {
     }
 
     http.begin(MJPEG_URL);
-    http.setReuse(false);
+    http.setReuse(true);
     http.setTimeout(10000);
 
     int httpCode = http.GET();
@@ -233,7 +233,7 @@ void fetchTask(void *pvParameters) {
       // acquire buffer if not held
       if (!active_buf) {
         if (!ctx->acquireLinear(&active_buf)) {
-          vTaskDelay(1);
+          taskYIELD();
           continue;
         }
         parser.write_ptr = 0;
@@ -269,7 +269,7 @@ void fetchTask(void *pvParameters) {
       }
 
       if (stream.available() == 0) {
-        vTaskDelay(1);
+        taskYIELD();
       } else {
         taskYIELD();
       }
