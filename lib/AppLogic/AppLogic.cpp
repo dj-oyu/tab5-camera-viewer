@@ -34,9 +34,11 @@ void AppLogic::begin() {
 
   vTaskDelay(1000);
 
-  FetchTask::start(ctx);
-  DecodeTask::start(ctx);
-  RenderTask::start(ctx);
+  // Core 0: Decode (HW JPEG decoder, low CPU usage)
+  // Core 1: Fetch + Render (Network I/O + display)
+  FetchTask::start(ctx, 6, 1);  // Core 1
+  DecodeTask::start(ctx, 5, 0); // Core 0 - HW decoder doesn't block WiFi
+  RenderTask::start(ctx, 5, 1); // Core 1
 }
 
 void AppLogic::update() { M5.update(); }
