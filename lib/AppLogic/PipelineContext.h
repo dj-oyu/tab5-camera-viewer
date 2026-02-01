@@ -43,8 +43,6 @@ public:
   uint16_t *decodeBuffer(int idx) const { return decode_bufs_[idx]; }
   int nextDecodeIndex();
 
-  uint8_t *ringBuffer() const { return ring_buf_; }
-
   bool acquireLinear(uint8_t **out_buf);
   void releaseLinear(uint8_t *buf);
 
@@ -60,6 +58,5 @@ private:
   int decode_idx_ = 0;
 
   uint16_t *fb_ = nullptr;
-  uint8_t *ring_buf_ = nullptr;
-  uint8_t *linear_bufs_[2] = {nullptr, nullptr};
+  uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
 };

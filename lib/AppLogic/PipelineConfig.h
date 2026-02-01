@@ -17,5 +17,6 @@ constexpr uint32_t DECODE_BUF_SIZE =
          : (PANEL_WIDTH * PANEL_HEIGHT)) *
     2;
 
-constexpr uint32_t RING_BUF_SIZE = 1024 * 1024;
-constexpr uint32_t LINEAR_BUF_SIZE = 256 * 1024;
+constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
+constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ
+constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
