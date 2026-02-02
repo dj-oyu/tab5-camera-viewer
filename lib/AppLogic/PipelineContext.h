@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DetectionData.h"
 #include "PipelineConfig.h"
 #include <cstdint>
 #include <driver/jpeg_decode.h>
@@ -46,6 +47,8 @@ public:
   bool acquireLinear(uint8_t **out_buf);
   void releaseLinear(uint8_t *buf);
 
+  DetectionData &detectionData() { return detection_data_; }
+
 private:
   QueueHandle_t frame_queue_ = nullptr;
   QueueHandle_t decoded_frame_queue_ = nullptr;
@@ -59,4 +62,5 @@ private:
 
   uint16_t *fb_ = nullptr;
   uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
+  DetectionData detection_data_;
 };

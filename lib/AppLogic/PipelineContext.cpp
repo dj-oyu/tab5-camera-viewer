@@ -48,6 +48,11 @@ bool PipelineContext::init() {
     }
   }
 
+  if (!detection_data_.init()) {
+    Serial.println("Failed to init DetectionData");
+    return false;
+  }
+
   return true;
 }
 

@@ -1,5 +1,6 @@
 #include "AppLogic.h"
 #include "DecodeTask.h"
+#include "DetectionTask.h"
 #include "DisplayInit.h"
 #include "FetchTask.h"
 #include "PipelineConfig.h"
@@ -35,10 +36,11 @@ void AppLogic::begin() {
   vTaskDelay(1000);
 
   // Core 0: Decode (HW JPEG decoder, low CPU usage)
-  // Core 1: Fetch + Render (Network I/O + display)
-  FetchTask::start(ctx, 6, 1);  // Core 1
-  DecodeTask::start(ctx, 5, 0); // Core 0 - HW decoder doesn't block WiFi
-  RenderTask::start(ctx, 5, 1); // Core 1
+  // Core 1: Fetch + Render + Detection (Network I/O + display)
+  FetchTask::start(ctx, 6, 1);     // Core 1 - MJPEG stream
+  DecodeTask::start(ctx, 5, 0);    // Core 0 - HW decoder doesn't block WiFi
+  RenderTask::start(ctx, 5, 1);    // Core 1 - Display output
+  // DetectionTask::start(ctx, 4, 1); // DISABLED for debugging
 }
 
 void AppLogic::update() { M5.update(); }
