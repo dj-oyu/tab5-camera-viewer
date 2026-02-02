@@ -107,10 +107,30 @@ def sse_listener():
                     if json_str:
                         try:
                             data = json.loads(json_str)
+
+                            # Debug: Log raw JSON structure
+                            raw_dets = data.get("detections", [])
+                            print(f"=== RAW JSON ===")
+                            print(f"Full data: {data}")
+                            if raw_dets:
+                                # Show actual field names for first detection
+                                first = raw_dets[0]
+                                fields = list(first.keys())
+                                print(f"Fields in detection[0]: {fields}")
+                                print(f"Raw detection[0]: {first}")
+                                # Check each possible field
+                                print(f"  class_name: {first.get('class_name', 'NOT FOUND')}")
+                                print(f"  label: {first.get('label', 'NOT FOUND')}")
+                                print(f"  name: {first.get('name', 'NOT FOUND')}")
+                                print(f"  className: {first.get('className', 'NOT FOUND')}")
+                            print(f"================")
+
                             detections = []
-                            for det in data.get("detections", []):
+                            for det in raw_dets:
+                                # Try multiple field names
+                                label = det.get("class_name") or det.get("label") or det.get("name") or "unknown"
                                 detections.append(Detection(
-                                    label=det.get("class_name", det.get("label", "unknown")),
+                                    label=label,
                                     confidence=det.get("confidence", 0.0)
                                 ))
 
@@ -119,9 +139,14 @@ def sse_listener():
                                 state.timestamp = int(time.time() * 1000)
                                 state.last_update = time.time()
 
-                            # Log the detection data
+                            # Log the detection data with raw field info
+                            if raw_dets:
+                                first = raw_dets[0]
+                                fields_info = f"[fields: {list(first.keys())}] "
+                            else:
+                                fields_info = ""
                             det_summary = ", ".join([f"{d.label}({d.confidence:.0%})" for d in detections])
-                            broadcast_log("data", f"[{len(detections)}] {det_summary}" if detections else "[0] No detections")
+                            broadcast_log("data", f"{fields_info}[{len(detections)}] {det_summary}" if detections else "[0] No detections")
                             broadcast_state()
 
                         except json.JSONDecodeError as e:
@@ -205,7 +230,10 @@ def set_mock():
 
     with state_lock:
         state.detections = [
-            Detection(label=d.get("label", "unknown"), confidence=d.get("confidence", 0.0))
+            Detection(
+                label=d.get("class_name") or d.get("label") or d.get("name") or "unknown",
+                confidence=d.get("confidence", 0.0)
+            )
             for d in data.get("detections", [])
         ]
         state.timestamp = int(time.time() * 1000)

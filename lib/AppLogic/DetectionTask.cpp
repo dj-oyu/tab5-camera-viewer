@@ -19,6 +19,9 @@ void parseDetectionJson(const char *json, DetectionData &data) {
     return;
   }
 
+  // Debug: print raw JSON (first 200 chars)
+  Serial.printf("Detection JSON: %.200s\n", json);
+
   data.beginUpdate();
 
   JsonArray detections = doc["detections"];
@@ -27,9 +30,22 @@ void parseDetectionJson(const char *json, DetectionData &data) {
     if (count >= MAX_DETECTIONS)
       break;
 
-    // API returns "class_name" not "label"
-    const char *label = det["class_name"] | "unknown";
+    // Try multiple possible field names (use modern ArduinoJson API)
+    const char *label = nullptr;
+    if (det["class_name"].is<const char *>()) {
+      label = det["class_name"].as<const char *>();
+    } else if (det["label"].is<const char *>()) {
+      label = det["label"].as<const char *>();
+    } else if (det["name"].is<const char *>()) {
+      label = det["name"].as<const char *>();
+    }
+    if (!label || label[0] == '\0') {
+      label = "unknown";
+    }
     float confidence = det["confidence"] | 0.0f;
+
+    // Debug: print each detection
+    Serial.printf("  [%d] label='%s' conf=%.2f\n", count, label, confidence);
 
     data.setDetection(count, label, confidence);
     count++;
@@ -38,6 +54,7 @@ void parseDetectionJson(const char *json, DetectionData &data) {
   data.setTimestamp(millis());
 
   data.endUpdate();
+  Serial.printf("Detection parsed: count=%d\n", count);
 }
 
 void detectionTask(void *pvParameters) {
