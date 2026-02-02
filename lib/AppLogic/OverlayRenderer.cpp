@@ -2,20 +2,14 @@
 #include "DetectionData.h"
 #include "PipelineConfig.h"
 #include <M5GFX.h>
-#include <cstring>
 
 namespace {
 
-// Cached detection data for display
-Detection cachedDetections[MAX_DETECTIONS];
-int cachedCount = 0;
-uint32_t cachedTimestamp = 0;
-uint32_t lastUpdateTime = 0;
+constexpr int SPRITE_W = 160;
+constexpr int SPRITE_H = 200;
+LGFX_Sprite textSprite;
 
 bool initialized = false;
-
-// Frame counter for periodic updates
-uint32_t frameCounter = 0;
 
 } // namespace
 
@@ -23,20 +17,25 @@ void OverlayRenderer::init() {
   if (initialized)
     return;
 
+  // Test: Create sprite in internal SRAM
+  textSprite.setPsram(false);
+  textSprite.setColorDepth(16);
+  if (textSprite.createSprite(SPRITE_W, SPRITE_H)) {
+    Serial.printf("OverlayRenderer: Sprite %dx%d created\n", SPRITE_W, SPRITE_H);
+  } else {
+    Serial.println("OverlayRenderer: Sprite creation failed!");
+  }
+
   initialized = true;
   Serial.println("OverlayRenderer initialized");
 }
 
 void OverlayRenderer::renderLeftBar(uint16_t *framebuffer, DetectionData &data) {
-  // TODO: Render detection stats overlay on left bar (top 160 rows in framebuffer)
-  // Note: Direct PSRAM writes are slow - consider using DMA or internal SRAM sprite
   (void)framebuffer;
   (void)data;
 }
 
 void OverlayRenderer::renderRightBar(uint16_t *framebuffer, DetectionData &data) {
-  // TODO: Render detection list overlay on right bar (bottom 160 rows in framebuffer)
-  // Note: Direct PSRAM writes are slow - consider using DMA or internal SRAM sprite
   (void)framebuffer;
   (void)data;
 }
