@@ -40,7 +40,7 @@ void AppLogic::begin() {
   FetchTask::start(ctx, 6, 1);     // Core 1 - MJPEG stream
   DecodeTask::start(ctx, 5, 0);    // Core 0 - HW decoder doesn't block WiFi
   RenderTask::start(ctx, 5, 1);    // Core 1 - Display output
-  // DetectionTask::start(ctx, 4, 1); // DISABLED for debugging
+  DetectionTask::start(ctx, 4, 1);  // Detection API (SSE stream)
 }
 
 void AppLogic::update() { M5.update(); }
