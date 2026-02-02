@@ -27,7 +27,8 @@ void parseDetectionJson(const char *json, DetectionData &data) {
     if (count >= MAX_DETECTIONS)
       break;
 
-    const char *label = det["label"] | "unknown";
+    // API returns "class_name" not "label"
+    const char *label = det["class_name"] | "unknown";
     float confidence = det["confidence"] | 0.0f;
 
     data.setDetection(count, label, confidence);
@@ -66,10 +67,15 @@ void detectionTask(void *pvParameters) {
       continue;
     }
 
+    Serial.println("DetectionTask: begin()...");
     http.begin(secureClient, DETECTION_URL);
     http.setTimeout(DETECTION_TIMEOUT_MS);
+    http.setReuse(false);  // Don't reuse connection for SSE
 
+    Serial.println("DetectionTask: GET()...");
+    uint32_t startTime = millis();
     int httpCode = http.GET();
+    Serial.printf("DetectionTask: GET() took %lu ms, code=%d\n", millis() - startTime, httpCode);
     if (httpCode != 200) {
       Serial.printf("Detection HTTP failed: %d\n", httpCode);
       http.end();
@@ -78,13 +84,17 @@ void detectionTask(void *pvParameters) {
     }
 
     Serial.println("Detection stream connected");
-    Stream &stream = http.getStream();
+    WiFiClient *client = http.getStreamPtr();
+    client->setTimeout(1);  // Non-blocking read with short timeout
 
     // Server-Sent Events (SSE) format: "data: {...}\n"
+    // Keepalive format: ": keepalive\n"
+    uint32_t lastActivity = millis();
     while (http.connected() && WiFi.status() == WL_CONNECTED) {
-      if (stream.available()) {
-        line = stream.readStringUntil('\n');
+      if (client->available()) {
+        line = client->readStringUntil('\n');
         line.trim();
+        lastActivity = millis();
 
         // SSE data line starts with "data: "
         if (line.startsWith("data: ")) {
@@ -93,8 +103,15 @@ void detectionTask(void *pvParameters) {
             parseDetectionJson(jsonStr.c_str(), data);
           }
         }
+        // SSE comment (keepalive) starts with ":"
+        // Just acknowledge it to keep connection alive
       } else {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // Check for stream timeout (no data for 60 seconds)
+        if (millis() - lastActivity > 60000) {
+          Serial.println("DetectionTask: Stream idle timeout");
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
       }
     }
 

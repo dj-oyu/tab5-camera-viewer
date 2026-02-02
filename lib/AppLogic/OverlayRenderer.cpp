@@ -77,6 +77,7 @@ void OverlayRenderer::render(DetectionData &data) {
   static Detection cachedDetections[MAX_DETECTIONS];
   static int cachedCount = 0;
   static uint32_t cachedTimestamp = 0;
+  static bool needsRender = true;  // Initial render needed
 
   Detection detections[MAX_DETECTIONS];
   int count = 0;
@@ -85,17 +86,24 @@ void OverlayRenderer::render(DetectionData &data) {
     memcpy(cachedDetections, detections, sizeof(Detection) * count);
     cachedCount = count;
     cachedTimestamp = timestamp;
+    needsRender = true;  // New data arrived
+  }
+
+  // Only render when new detection data arrives
+  if (!needsRender) {
+    return;
   }
 
   static uint32_t lastRender = 0;
   static bool renderTopBar = true;  // Alternate between bars
   uint32_t now = millis();
 
-  // Render one bar every 1 second (alternating)
-  if ((now - lastRender) < 1000) {
+  // Rate limit to 500ms minimum between renders
+  if ((now - lastRender) < 500) {
     return;
   }
   lastRender = now;
+  needsRender = false;  // Mark as rendered
 
   if (renderTopBar) {
     // === TOP BAR (camera side, right in landscape) ===

@@ -1,0 +1,16 @@
+[project]
+name = "ui-simulator"
+version = "0.1.0"
+description = "Detection Overlay UI Simulator for Tab5 Camera Viewer"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.0.0",
+    "requests>=2.31.0",
+    "urllib3>=2.0.0",
+]
+
+[project.scripts]
+ui-simulator = "app:main"
+
+[tool.uv]
+dev-dependencies = []
