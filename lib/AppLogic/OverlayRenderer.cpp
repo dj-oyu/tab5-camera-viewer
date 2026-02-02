@@ -35,15 +35,13 @@ void OverlayRenderer::init(uint16_t *framebuffer) {
   bottomBar = framebuffer + (PANEL_HEIGHT - OVERLAY_BAR_SIZE) * PANEL_WIDTH;
 
   // Create tile sprite in internal SRAM
-  // Sprite dimensions: TILE_WIDTH x TILE_HEIGHT (240 x 160)
-  // With setRotation(3), drawing coordinates become 160 x 240 (landscape text)
-  tileSprite.setPsram(false);  // Force internal SRAM
+  tileSprite.setPsram(false);
   tileSprite.setColorDepth(16);
   if (!tileSprite.createSprite(TILE_WIDTH, TILE_HEIGHT)) {
     Serial.println("OverlayRenderer: tileSprite FAILED");
     return;
   }
-  tileSprite.setRotation(3);  // 270° for landscape text (reads bottom-to-top in framebuffer)
+  tileSprite.setRotation(3);
   tileSprite.setTextSize(2);
   Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, internal SRAM)\n",
                 TILE_WIDTH, TILE_HEIGHT);
