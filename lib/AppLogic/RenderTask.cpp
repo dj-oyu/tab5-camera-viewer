@@ -4,6 +4,7 @@
 #include "PipelineContext.h"
 #include <PPAPipeline.h>
 #include <Arduino.h>
+#include <esp_cache.h>
 
 namespace {
 struct ScalePlan {
@@ -36,8 +37,8 @@ void renderTask(void *pvParameters) {
 
   Serial.println("RenderTask: Starting...");
 
-  // Initialize overlay renderer
-  OverlayRenderer::init();
+  // Initialize overlay renderer with framebuffer address
+  OverlayRenderer::init(ctx->framebuffer());
 
   Serial.println("RenderTask: Initialized");
 
@@ -76,9 +77,8 @@ void renderTask(void *pvParameters) {
 
         if (ppa_ok) {
           if (xSemaphoreTake(ctx->ppaDoneSema(), pdMS_TO_TICKS(100)) == pdTRUE) {
-            // Render overlays AFTER PPA completes (avoid memory conflicts)
-            OverlayRenderer::renderLeftBar(ctx->framebuffer(), ctx->detectionData());
-            OverlayRenderer::renderRightBar(ctx->framebuffer(), ctx->detectionData());
+            // Render overlays (handles its own cache sync)
+            OverlayRenderer::render(ctx->detectionData());
 
             esp_lcd_panel_draw_bitmap(ctx->panelHandle(), 0, 0, PANEL_WIDTH,
                                       PANEL_HEIGHT, ctx->framebuffer());

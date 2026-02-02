@@ -6,15 +6,14 @@ class DetectionData;
 
 namespace OverlayRenderer {
 
-// Initialize overlay rendering resources
-void init();
+// Initialize with framebuffer pointer (called once)
+void init(uint16_t *framebuffer);
 
-// Render left bar (framebuffer top 160 rows, appears as left side in landscape)
-// Must be called after PPA starts but before PPA completion
-void renderLeftBar(uint16_t *framebuffer, DetectionData &data);
+// Physical layout (landscape, USB left, camera right):
+// - Framebuffer top (rows 0-159) → Camera side (right)
+// - Framebuffer bottom (rows 1120-1279) → USB side (left)
 
-// Render right bar (framebuffer bottom 160 rows, appears as right side in landscape)
-// Must be called after PPA starts but before PPA completion
-void renderRightBar(uint16_t *framebuffer, DetectionData &data);
+// Render both overlay bars
+void render(DetectionData &data);
 
 } // namespace OverlayRenderer
