@@ -24,6 +24,10 @@ constexpr uint32_t INTERNAL_CACHE_GUARD_BYTES = 128 * 1024; // 内部SRAMを使�
 constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
 constexpr uint32_t RENDER_BUF_COUNT = 2;      // Display submit用ダブルバッファ
 constexpr uint32_t FETCH_RX_BUF_SIZE = 16384; // Fetch socket read size (internal SRAM cache)
+constexpr uint32_t FETCH_TCP_RCVBUF_BYTES = 64 * 1024;
+constexpr uint32_t FETCH_COALESCE_MIN_BYTES = 4096;
+constexpr uint32_t FETCH_COALESCE_WAIT_US = 1200;
+constexpr uint32_t FETCH_COALESCE_POLL_US = 50;
 constexpr uint32_t FETCH_IDLE_BACKOFF_US = 200;
 
 // Performance logging / control

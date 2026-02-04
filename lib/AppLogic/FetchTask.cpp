@@ -10,6 +10,7 @@
 #include <esp_heap_caps.h>
 #include <esp_rom_sys.h>
 #include <esp_timer.h>
+#include <lwip/sockets.h>
 
 namespace {
 
@@ -63,9 +64,12 @@ struct FetchPerfStats {
   uint32_t parser_resets = 0;
   uint32_t oversize_drops = 0;
   uint32_t no_linear_waits = 0;
+  uint32_t coalesce_reads = 0;
   uint64_t parse_us = 0;
   uint64_t sync_us = 0;
+  uint64_t read_wait_us = 0;
   uint64_t idle_wait_us = 0;
+  uint64_t coalesce_wait_us = 0;
   uint64_t read_bytes = 0;
   uint64_t frame_bytes = 0;
   uint64_t bytes_per_read_acc = 0;
@@ -103,6 +107,66 @@ void initWiFi() {
   }
   Serial.printf("\nWiFi Connected (RSSI=%d dBm)\n", WiFi.RSSI());
 #endif
+}
+
+void configureFetchSocket(WiFiClient &stream) {
+  int rcvbuf = static_cast<int>(FETCH_TCP_RCVBUF_BYTES);
+  int rcvbuf_res =
+      stream.setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  int nodelay_res = stream.setNoDelay(true);
+  Serial.printf("Fetch socket: rcvbuf=%lu(%s) nodelay=%s\n",
+                static_cast<unsigned long>(FETCH_TCP_RCVBUF_BYTES),
+                (rcvbuf_res == 0) ? "ok" : "fail",
+                (nodelay_res == 0) ? "on" : "fail");
+}
+
+int readCoalesced(WiFiClient &stream, uint8_t *buf, size_t cap,
+                  FetchPerfStats &perf) {
+  int64_t read_start = esp_timer_get_time();
+  int bytes_read = stream.read(buf, cap);
+  uint64_t first_read_us =
+      static_cast<uint64_t>(esp_timer_get_time() - read_start);
+
+  if (bytes_read <= 0) {
+    perf.idle_wait_us += first_read_us;
+    return bytes_read;
+  }
+  perf.read_wait_us += first_read_us;
+
+  size_t total = static_cast<size_t>(bytes_read);
+  if (total >= FETCH_COALESCE_MIN_BYTES) {
+    return static_cast<int>(total);
+  }
+
+  int64_t coalesce_start = esp_timer_get_time();
+  while (total < cap) {
+    int64_t elapsed = esp_timer_get_time() - coalesce_start;
+    if (elapsed >= static_cast<int64_t>(FETCH_COALESCE_WAIT_US)) {
+      break;
+    }
+
+    int avail = stream.available();
+    if (avail <= 0) {
+      esp_rom_delay_us(FETCH_COALESCE_POLL_US);
+      continue;
+    }
+
+    size_t to_read = std::min<size_t>(cap - total, static_cast<size_t>(avail));
+    int64_t extra_read_start = esp_timer_get_time();
+    int n = stream.read(buf + total, to_read);
+    perf.read_wait_us +=
+        static_cast<uint64_t>(esp_timer_get_time() - extra_read_start);
+    if (n <= 0) {
+      break;
+    }
+
+    total += static_cast<size_t>(n);
+    perf.coalesce_reads++;
+  }
+  perf.coalesce_wait_us +=
+      static_cast<uint64_t>(esp_timer_get_time() - coalesce_start);
+
+  return static_cast<int>(total);
 }
 
 // Parse byte stream and fill buffer.
@@ -295,15 +359,18 @@ void logFetchPerf(const FetchPerfStats &perf, uint32_t window_ms,
   Serial.printf("MJPEG FPS: %.1f\n", fps);
   Serial.printf(
       "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
-      "sync=%lluus idle=%lluus reads=%u drops=%u ovf=%u reset=%u no_buf=%u "
-      "queues(frame=%u linear=%u)\n",
+      "sync=%lluus rwait=%lluus idle=%lluus cwait=%lluus reads=%u creads=%u "
+      "drops=%u ovf=%u reset=%u no_buf=%u queues(frame=%u linear=%u)\n",
       fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
       static_cast<unsigned long long>(bytes_per_read),
       static_cast<unsigned long long>(perf.parse_us / frame_div),
       static_cast<unsigned long long>(perf.sync_us / frame_div),
+      static_cast<unsigned long long>(perf.read_wait_us / read_div),
       static_cast<unsigned long long>(perf.idle_wait_us / read_div),
-      perf.read_calls, perf.queue_drops, perf.oversize_drops, perf.parser_resets,
-      perf.no_linear_waits, uxQueueMessagesWaiting(ctx.frameQueue()),
+      static_cast<unsigned long long>(perf.coalesce_wait_us / read_div),
+      perf.read_calls, perf.coalesce_reads, perf.queue_drops, perf.oversize_drops,
+      perf.parser_resets, perf.no_linear_waits,
+      uxQueueMessagesWaiting(ctx.frameQueue()),
       uxQueueMessagesWaiting(ctx.linearFreeQueue()));
 }
 
@@ -359,7 +426,7 @@ void fetchTask(void *pvParameters) {
 
     Serial.println("Stream connected");
     WiFiClient &stream = http.getStream();
-    stream.setTimeout(1);
+    configureFetchSocket(stream);
 
     uint32_t last_data_time = millis();
     uint32_t last_frame_time = millis();
@@ -379,9 +446,7 @@ void fetchTask(void *pvParameters) {
         parser.write_ptr = 0;
       }
 
-      int64_t read_start = esp_timer_get_time();
-      int bytes_read = stream.read(rx_buf, FETCH_RX_BUF_SIZE);
-      uint64_t read_us = static_cast<uint64_t>(esp_timer_get_time() - read_start);
+      int bytes_read = readCoalesced(stream, rx_buf, FETCH_RX_BUF_SIZE, perf);
 
       if (bytes_read > 0) {
         perf.read_calls++;
@@ -440,7 +505,6 @@ void fetchTask(void *pvParameters) {
           }
         }
       } else {
-        perf.idle_wait_us += read_us;
         taskYIELD();
         esp_rom_delay_us(FETCH_IDLE_BACKOFF_US);
       }

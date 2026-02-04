@@ -345,6 +345,10 @@ LINEAR_INTERNAL_CACHE_COUNT = 2  // 先頭2本を内部SRAM優先
 INTERNAL_CACHE_GUARD_BYTES = 131072 // 内部SRAM最低残量ガード
 DECODE_BUF_SIZE = max(STREAM, PANEL) * 2
 FETCH_RX_BUF_SIZE = 16384
+FETCH_TCP_RCVBUF_BYTES = 65536
+FETCH_COALESCE_MIN_BYTES = 4096
+FETCH_COALESCE_WAIT_US = 1200
+FETCH_COALESCE_POLL_US = 50
 FETCH_IDLE_BACKOFF_US = 200
 
 // 性能ログ / 負荷制御
@@ -358,24 +362,10 @@ STACK_DEPTH = 16384
 
 ## デバッグ
 
-### パフォーマンスモニタリング
-
-```cpp
-// Render Task内
-frame_count++;
-if (frame_count >= 100) {
-    uint32_t now = millis();
-    Serial.printf("Render FPS: %.1f\n",
-                  100.0f * 1000.0f / (now - last_fps_time));
-    last_fps_time = now;
-    frame_count = 0;
-}
-```
-
 ### ログ出力
 
 - Stream connected - HTTP接続成功
-- Render FPS: XX.X - 100フレームごとのFPS
+- MJPEG FPS / Render FPS - 2秒窓ごとのFPS
 
 ## 参考資料
 

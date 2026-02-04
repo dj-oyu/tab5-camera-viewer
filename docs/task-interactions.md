@@ -38,6 +38,8 @@ if (xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 - Fetchの受信バッファ(`FETCH_RX_BUF_SIZE=16KB`)は内部SRAM優先で確保し、
   `LINEAR_INTERNAL_CACHE_COUNT`本のlinear bufferも内部SRAM優先で配置する
   （`INTERNAL_CACHE_GUARD_BYTES`を下回る場合/確保失敗時はSPIRAMへフォールバック）。
+- ソケットは `SO_RCVBUF` を拡大し、短時間coalescing(`FETCH_COALESCE_*`)で
+  `bytes_per_read` を上げる。
 
 ## 2. Decode → Render (`decodedFrameQueue`)
 
@@ -89,7 +91,7 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 
 ## 6. 計測ログ
 
-- Fetch: `Fetch Perf: fps=... mbps=... frame=... read=... parse=... sync=... idle=...`
+- Fetch: `Fetch Perf: fps=... mbps=... frame=... read=... parse=... sync=... rwait=... idle=... cwait=...`
 - Decode: `Decode Perf: fps=... decode=... errors=...`
 - Render: `Render Perf: fps=... buf_wait=... ppa=... overlay=... disp_wait=...`
 
