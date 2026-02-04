@@ -183,21 +183,52 @@
             padding-top: 10px;
         }
 
-        /* Detection item in bottom bar */
-        .detection-item {
-            margin-bottom: 20px;
+        /* Left bar tiles - no padding, let detection-list handle spacing */
+        .overlay-bar.left .tile {
+            padding: 0 10px;
+        }
+
+        /* Detection list - calculated to fill 240px tile exactly
+           6px top + (48px × 4) + (12px × 3) + 6px bottom = 240px */
+        .detection-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 6px 0;
+        }
+
+        .detection-row {
+            position: relative;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            background: #111;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .detection-meter {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: linear-gradient(90deg, #228822 0%, #44aa44 100%);
+            opacity: 0.7;
+            transition: width 0.3s ease;
         }
 
         .detection-label {
+            position: relative;
+            z-index: 1;
             font-size: 22px;
             font-weight: bold;
-            color: #ffff00;
-        }
-
-        .detection-confidence {
-            font-size: 20px;
             color: #ffffff;
-            margin-top: 4px;
+            padding: 0 10px;
+            text-shadow: 1px 1px 2px #000;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            width: 100%;
         }
 
         /* Control panel */
@@ -412,14 +443,18 @@
 
         <div class="status-bar">
             <div class="status-item">
+                <div class="status-dot" id="detectionDot"></div>
+                <span id="detectionStatus">Detection: Connecting...</span>
+            </div>
+            <div class="status-item">
                 <div class="status-dot" id="connectionDot"></div>
-                <span id="connectionStatus">Connecting...</span>
+                <span id="connectionStatus">Connections: Connecting...</span>
             </div>
             <div class="status-item">
                 <span>Detections: <strong id="detectionCount">0</strong></span>
             </div>
             <div class="status-item">
-                <span>Last update: <strong id="lastUpdate">-</strong></span>
+                <span>Connections: <strong id="connCount">0</strong></span>
             </div>
         </div>
 
@@ -446,13 +481,13 @@
                 <!-- Right bar (Camera side, top bar in framebuffer) -->
                 <div class="overlay-bar right" id="rightBar">
                     <div class="tile" id="rightTile0" data-tile="Tile 0">
-                        <div class="tile-single" style="color: #fff;" id="detCountDisplay">Det: 0</div>
+                        <div class="tile-single" style="color: #00ffff;" id="connDisplay">Conn: 0</div>
                     </div>
                     <div class="tile" id="rightTile1" data-tile="Tile 1">
-                        <div class="tile-single" style="color: #00ff00;" id="statusDisplay">OK</div>
+                        <!-- Empty -->
                     </div>
                     <div class="tile" id="rightTile2" data-tile="Tile 2">
-                        <div class="tile-single" style="color: #00ffff;" id="timeDisplay">T:0</div>
+                        <!-- Empty -->
                     </div>
                 </div>
             </div>
@@ -462,19 +497,35 @@
 
         <div class="grid-2">
             <div class="controls">
-                <h2>Mock Data</h2>
+                <h2>Mock Detections</h2>
                 <div class="control-group">
                     <label>Test JSON (Detection API format):</label>
                     <textarea id="mockJson">{
   "detections": [
     {"class_name": "person", "confidence": 0.95},
     {"class_name": "car", "confidence": 0.87},
-    {"class_name": "dog", "confidence": 0.72}
+    {"class_name": "dog", "confidence": 0.72},
+    {"class_name": "cat", "confidence": 0.65},
+    {"class_name": "bird", "confidence": 0.58},
+    {"class_name": "bicycle", "confidence": 0.52},
+    {"class_name": "truck", "confidence": 0.48},
+    {"class_name": "bus", "confidence": 0.41}
   ]
 }</textarea>
                 </div>
                 <button class="btn btn-primary" onclick="sendMock()">Send Mock Data</button>
                 <button class="btn btn-secondary" onclick="clearDetections()">Clear</button>
+
+                <h2 style="margin-top: 20px;">Mock Connections</h2>
+                <div class="control-group">
+                    <label>WebRTC connections:</label>
+                    <input type="number" id="mockWebrtc" value="0" min="0" max="10" style="width: 80px;">
+                </div>
+                <div class="control-group">
+                    <label>MJPEG connections:</label>
+                    <input type="number" id="mockMjpeg" value="0" min="0" max="10" style="width: 80px;">
+                </div>
+                <button class="btn btn-primary" onclick="sendMockConnections()">Set Connections</button>
             </div>
 
             <div class="info-panel api-monitor">
@@ -494,51 +545,61 @@
         let eventSource = null;
 
         function updateDisplay(data) {
-            // Update status
+            // Update detection status
+            const dot = document.getElementById('detectionDot');
+            const status = document.getElementById('detectionStatus');
+            if (data.connected) {
+                dot.className = 'status-dot connected';
+                status.textContent = 'Detection: Connected';
+            } else {
+                dot.className = 'status-dot disconnected';
+                status.textContent = 'Detection: ' + (data.error || 'Disconnected');
+            }
+
+            // Update detection count
+            document.getElementById('detectionCount').textContent = data.count;
+
+            // Update left bar - 4 detections per tile, max 12 total
+            const detections = data.detections || [];
+
+            for (let tileIdx = 0; tileIdx < 3; tileIdx++) {
+                const tile = document.getElementById(`leftTile${tileIdx}`);
+                const start = tileIdx * 4;
+                const tileDetections = detections.slice(start, start + 4);
+
+                if (tileDetections.length > 0) {
+                    const rows = tileDetections.map(det => {
+                        const pct = Math.round(det.confidence * 100);
+                        return `
+                            <div class="detection-row">
+                                <div class="detection-meter" style="width: ${pct}%;"></div>
+                                <span class="detection-label">${det.label}</span>
+                            </div>
+                        `;
+                    }).join('');
+                    tile.innerHTML = `<div class="detection-list">${rows}</div>`;
+                } else {
+                    tile.innerHTML = '';
+                }
+            }
+        }
+
+        function updateConnections(data) {
+            // Update connection status
             const dot = document.getElementById('connectionDot');
             const status = document.getElementById('connectionStatus');
             if (data.connected) {
                 dot.className = 'status-dot connected';
-                status.textContent = 'Connected';
+                status.textContent = 'Connections: Connected';
             } else {
                 dot.className = 'status-dot disconnected';
-                status.textContent = data.error || 'Disconnected';
+                status.textContent = 'Connections: Disconnected';
             }
 
-            // Update counts
-            document.getElementById('detectionCount').textContent = data.count;
-            document.getElementById('detCountDisplay').textContent = `Det: ${data.count}`;
-
-            // Update timestamp
-            if (data.timestamp > 0) {
-                const seconds = Math.floor(data.timestamp / 1000);
-                document.getElementById('timeDisplay').textContent = `T:${seconds}`;
-                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
-            }
-
-            // Update left bar (detection list)
-            // Actual device: empty tiles show nothing (just black)
-            const detections = data.detections || [];
-            for (let i = 0; i < 3; i++) {
-                const tile = document.getElementById(`leftTile${i}`);
-                if (i < detections.length) {
-                    const det = detections[i];
-                    tile.innerHTML = `
-                        <div class="detection-item">
-                            <div class="detection-label">${det.label}</div>
-                            <div class="detection-confidence">${Math.round(det.confidence * 100)}%</div>
-                        </div>
-                    `;
-                } else {
-                    // Empty tile (matches actual device: fillScreen(TFT_BLACK) only)
-                    tile.innerHTML = '';
-                }
-            }
-
-            // Update status (matches actual device: always shows "OK" in green)
-            const statusDisplay = document.getElementById('statusDisplay');
-            statusDisplay.textContent = 'OK';
-            statusDisplay.style.color = '#00ff00';
+            // Update connection count
+            const total = data.total || 0;
+            document.getElementById('connCount').textContent = total;
+            document.getElementById('connDisplay').textContent = `Conn: ${total}`;
         }
 
         function connectSSE() {
@@ -563,6 +624,31 @@
             };
         }
 
+        // Connection SSE
+        let connSource = null;
+
+        function connectConnectionsSSE() {
+            if (connSource) {
+                connSource.close();
+            }
+
+            connSource = new EventSource('/api/connections/stream');
+
+            connSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateConnections(data);
+                } catch (e) {
+                    console.error('Connections parse error:', e);
+                }
+            };
+
+            connSource.onerror = function() {
+                console.log('Connections SSE error, reconnecting...');
+                setTimeout(connectConnectionsSSE, 3000);
+            };
+        }
+
         function sendMock() {
             try {
                 const json = JSON.parse(document.getElementById('mockJson').value);
@@ -581,6 +667,16 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ detections: [] })
+            });
+        }
+
+        function sendMockConnections() {
+            const webrtc = parseInt(document.getElementById('mockWebrtc').value) || 0;
+            const mjpeg = parseInt(document.getElementById('mockMjpeg').value) || 0;
+            fetch('/api/connections/mock', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ webrtc, mjpeg })
             });
         }
 
@@ -695,6 +791,7 @@
         // Start SSE connections
         connectSSE();
         connectLogStream();
+        connectConnectionsSSE();
     </script>
 </body>
 </html>

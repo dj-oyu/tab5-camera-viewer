@@ -27,6 +27,7 @@ app = Flask(__name__)
 # Configuration
 DETECTION_URL = "https://192.168.1.33:8080/api/detections/stream?format=json"
 MJPEG_URL = "http://192.168.1.33:8082/stream"
+CONNECTIONS_URL = "https://192.168.1.33:8080/api/connections/stream"
 
 # Display dimensions (matching PipelineConfig.h)
 PANEL_WIDTH = 720
@@ -34,11 +35,22 @@ PANEL_HEIGHT = 1280
 OVERLAY_BAR_SIZE = 160
 VIDEO_HEIGHT = 960
 
+# Detection timeout - clear detections if no data for this many seconds
+DETECTION_TIMEOUT_SEC = 3.0
+
 # Shared state
 @dataclass
 class Detection:
     label: str = "unknown"
     confidence: float = 0.0
+
+@dataclass
+class ConnectionStats:
+    webrtc: int = 0
+    mjpeg: int = 0
+    total: int = 0
+    timestamp: int = 0
+    connected: bool = False
 
 @dataclass
 class AppState:
@@ -52,6 +64,11 @@ state = AppState()
 state_lock = threading.Lock()
 sse_clients: List[queue.Queue] = []
 log_clients: List[queue.Queue] = []  # For raw API event log
+
+# Connection stats
+conn_stats = ConnectionStats()
+conn_stats_lock = threading.Lock()
+conn_clients: List[queue.Queue] = []  # SSE clients for connection updates
 
 
 def broadcast_log(event_type: str, content: str):
@@ -158,6 +175,17 @@ def sse_listener():
                     print(f"Keepalive: {line}")
                     broadcast_log("keepalive", line[1:].strip() or "ping")
 
+                    # Check if detections should be cleared due to timeout
+                    with state_lock:
+                        if state.detections and state.last_update > 0:
+                            elapsed = time.time() - state.last_update
+                            if elapsed > DETECTION_TIMEOUT_SEC:
+                                state.detections = []
+                                state.timestamp = int(time.time() * 1000)
+                                print(f"Detection timeout ({elapsed:.1f}s) - cleared")
+                                broadcast_log("data", "[timeout] No detections")
+                    broadcast_state()
+
         except requests.exceptions.RequestException as e:
             print(f"Connection error: {e}")
             broadcast_log("error", f"Connection error: {e}")
@@ -199,6 +227,89 @@ def broadcast_state():
 
     for q in dead_clients:
         sse_clients.remove(q)
+
+
+def broadcast_conn_stats():
+    """Send connection stats update to all connected SSE clients"""
+    with conn_stats_lock:
+        data = {
+            "webrtc": conn_stats.webrtc,
+            "mjpeg": conn_stats.mjpeg,
+            "total": conn_stats.total,
+            "timestamp": conn_stats.timestamp,
+            "connected": conn_stats.connected
+        }
+
+    message = f"data: {json.dumps(data)}\n\n"
+
+    dead_clients = []
+    for q in conn_clients:
+        try:
+            q.put_nowait(message)
+        except queue.Full:
+            dead_clients.append(q)
+
+    for q in dead_clients:
+        conn_clients.remove(q)
+
+
+def conn_sse_listener():
+    """Background thread to listen to connection stats SSE stream"""
+    global conn_stats
+
+    while True:
+        try:
+            with conn_stats_lock:
+                conn_stats.connected = False
+
+            print(f"Connecting to connections API: {CONNECTIONS_URL}")
+            broadcast_log("connect", f"Connecting to {CONNECTIONS_URL}...")
+            response = requests.get(CONNECTIONS_URL, stream=True, verify=False, timeout=30)
+            response.raise_for_status()
+
+            with conn_stats_lock:
+                conn_stats.connected = True
+
+            print("Connections SSE stream connected")
+            broadcast_log("connect", "Connections API connected")
+            broadcast_conn_stats()
+
+            for line in response.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+
+                if line.startswith("data:"):
+                    json_str = line[5:].strip()
+                    if json_str:
+                        try:
+                            data = json.loads(json_str)
+
+                            with conn_stats_lock:
+                                conn_stats.webrtc = data.get("webrtc", 0)
+                                conn_stats.mjpeg = data.get("mjpeg", 0)
+                                conn_stats.total = conn_stats.webrtc + conn_stats.mjpeg
+                                conn_stats.timestamp = int(time.time() * 1000)
+
+                            broadcast_conn_stats()
+
+                        except json.JSONDecodeError as e:
+                            print(f"Connections JSON parse error: {e}")
+
+                elif line.startswith(":"):
+                    pass  # Keepalive
+
+        except requests.exceptions.RequestException as e:
+            print(f"Connections API connection error: {e}")
+            with conn_stats_lock:
+                conn_stats.connected = False
+            broadcast_conn_stats()
+            time.sleep(3)
+        except Exception as e:
+            print(f"Connections API unexpected error: {e}")
+            with conn_stats_lock:
+                conn_stats.connected = False
+            broadcast_conn_stats()
+            time.sleep(3)
 
 
 @app.route("/")
@@ -312,19 +423,84 @@ def log_stream():
     return Response(generate(), mimetype="text/event-stream")
 
 
+@app.route("/api/connections")
+def get_connections():
+    """Get current connection stats"""
+    with conn_stats_lock:
+        return jsonify({
+            "webrtc": conn_stats.webrtc,
+            "mjpeg": conn_stats.mjpeg,
+            "total": conn_stats.total,
+            "timestamp": conn_stats.timestamp,
+            "connected": conn_stats.connected
+        })
+
+
+@app.route("/api/connections/stream")
+def connections_stream():
+    """SSE endpoint for real-time connection updates"""
+    def generate():
+        q = queue.Queue(maxsize=10)
+        conn_clients.append(q)
+
+        # Send initial state
+        with conn_stats_lock:
+            data = {
+                "webrtc": conn_stats.webrtc,
+                "mjpeg": conn_stats.mjpeg,
+                "total": conn_stats.total,
+                "timestamp": conn_stats.timestamp,
+                "connected": conn_stats.connected
+            }
+        yield f"data: {json.dumps(data)}\n\n"
+
+        try:
+            while True:
+                try:
+                    message = q.get(timeout=30)
+                    yield message
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            if q in conn_clients:
+                conn_clients.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route("/api/connections/mock", methods=["POST"])
+def set_mock_connections():
+    """Set mock connection data for testing"""
+    from flask import request
+    data = request.json
+
+    with conn_stats_lock:
+        conn_stats.webrtc = data.get("webrtc", conn_stats.webrtc)
+        conn_stats.mjpeg = data.get("mjpeg", conn_stats.mjpeg)
+        conn_stats.total = conn_stats.webrtc + conn_stats.mjpeg
+        conn_stats.timestamp = int(time.time() * 1000)
+
+    broadcast_conn_stats()
+    return jsonify({"status": "ok"})
+
+
 def main():
     """Entry point for uv run"""
-    # Start SSE listener thread
-    listener_thread = threading.Thread(target=sse_listener, daemon=True)
-    listener_thread.start()
+    # Start SSE listener threads
+    detection_thread = threading.Thread(target=sse_listener, daemon=True)
+    detection_thread.start()
+
+    connections_thread = threading.Thread(target=conn_sse_listener, daemon=True)
+    connections_thread.start()
 
     print("=" * 60)
     print("Detection Overlay UI Simulator")
     print("=" * 60)
-    print(f"MJPEG Stream:   {MJPEG_URL}")
-    print(f"Detection API:  {DETECTION_URL}")
-    print(f"Display:        {PANEL_WIDTH}x{PANEL_HEIGHT} (landscape view)")
-    print(f"Overlay bars:   {OVERLAY_BAR_SIZE}px each")
+    print(f"MJPEG Stream:     {MJPEG_URL}")
+    print(f"Detection API:    {DETECTION_URL}")
+    print(f"Connections API:  {CONNECTIONS_URL}")
+    print(f"Display:          {PANEL_WIDTH}x{PANEL_HEIGHT} (landscape view)")
+    print(f"Overlay bars:     {OVERLAY_BAR_SIZE}px each")
     print("=" * 60)
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
