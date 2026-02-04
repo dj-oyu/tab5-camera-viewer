@@ -32,3 +32,23 @@ bool ConnectionData::tryRead(int *out_total, int *out_webrtc, int *out_mjpeg) {
   xSemaphoreGive(mutex_);
   return true;
 }
+
+void ConnectionData::setState(ConnectionState state, int httpCode) {
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+    state_ = state;
+    httpCode_ = httpCode;
+    xSemaphoreGive(mutex_);
+  }
+}
+
+ConnectionState ConnectionData::getState(int *out_httpCode) {
+  ConnectionState state = ConnectionState::Connecting;
+  if (xSemaphoreTake(mutex_, 0) == pdTRUE) {
+    state = state_;
+    if (out_httpCode) {
+      *out_httpCode = httpCode_;
+    }
+    xSemaphoreGive(mutex_);
+  }
+  return state;
+}

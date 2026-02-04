@@ -435,6 +435,116 @@
         .log-content .confidence {
             color: #00ff88;
         }
+
+        /* Recording button styles */
+        .recording-control {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            gap: 10px;
+        }
+
+        .btn-record {
+            width: 120px;
+            height: 50px;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+        }
+
+        .btn-record.idle {
+            background: #cc0000;
+            color: #fff;
+        }
+
+        .btn-record.idle:hover {
+            background: #ff0000;
+            box-shadow: 0 0 15px rgba(255, 0, 0, 0.5);
+        }
+
+        .btn-record.recording {
+            background: #444;
+            color: #fff;
+            border: 2px solid #ff0000;
+        }
+
+        .btn-record.recording:hover {
+            background: #555;
+        }
+
+        .btn-record:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Recording indicator dot */
+        .rec-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ff0000;
+        }
+
+        .rec-dot.active {
+            animation: pulse-dot 1s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% {
+                opacity: 1;
+                box-shadow: 0 0 8px #ff0000;
+            }
+            50% {
+                opacity: 0.4;
+                box-shadow: 0 0 4px #ff0000;
+            }
+        }
+
+        /* Recording stats display */
+        .recording-stats {
+            font-family: monospace;
+            font-size: 16px;
+            color: #00ff88;
+            text-align: center;
+        }
+
+        .recording-stats.inactive {
+            color: #666;
+        }
+
+        .recording-duration {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .recording-size {
+            font-size: 14px;
+            color: #aaa;
+        }
+
+        .recording-error {
+            color: #ff4444;
+            font-size: 12px;
+            text-align: center;
+            padding: 5px;
+            max-width: 140px;
+            word-wrap: break-word;
+        }
+
+        /* Recording log type */
+        .log-type.recording {
+            background: #cc0000;
+            color: #fff;
+        }
     </style>
 </head>
 <body>
@@ -487,7 +597,16 @@
                         <!-- Empty -->
                     </div>
                     <div class="tile" id="rightTile2" data-tile="Tile 2">
-                        <!-- Empty -->
+                        <div class="recording-control">
+                            <button class="btn-record idle" id="recordBtn" onclick="toggleRecording()">
+                                <span class="rec-dot" id="recDot"></span>
+                                <span id="recordBtnText">REC</span>
+                            </button>
+                            <div class="recording-stats inactive" id="recordingStats">
+                                <div class="recording-duration" id="recordingDuration">--:--</div>
+                            </div>
+                            <div class="recording-error" id="recordingError" style="display: none;"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -792,6 +911,169 @@
         connectSSE();
         connectLogStream();
         connectConnectionsSSE();
+
+        // Recording state
+        let recordingSource = null;
+        let isRecording = false;
+        let heartbeatInterval = null;
+
+        function startHeartbeat() {
+            stopHeartbeat();
+            heartbeatInterval = setInterval(async () => {
+                try {
+                    await fetch('/api/recording/heartbeat', { method: 'POST' });
+                } catch (e) {
+                    console.error('Heartbeat failed:', e);
+                }
+            }, 1000);  // Send heartbeat every 1 second
+        }
+
+        function stopHeartbeat() {
+            if (heartbeatInterval) {
+                clearInterval(heartbeatInterval);
+                heartbeatInterval = null;
+            }
+        }
+
+        function updateRecordingDisplay(data) {
+            const btn = document.getElementById('recordBtn');
+            const btnText = document.getElementById('recordBtnText');
+            const dot = document.getElementById('recDot');
+            const stats = document.getElementById('recordingStats');
+            const duration = document.getElementById('recordingDuration');
+            const error = document.getElementById('recordingError');
+
+            const wasRecording = isRecording;
+            isRecording = data.recording;
+
+            // Start/stop heartbeat based on recording state change
+            if (data.recording && !wasRecording) {
+                startHeartbeat();
+            } else if (!data.recording && wasRecording) {
+                stopHeartbeat();
+            }
+
+            if (data.recording) {
+                btn.className = 'btn-record recording';
+                btnText.textContent = 'STOP';
+                dot.className = 'rec-dot active';
+                stats.className = 'recording-stats';
+
+                // Format duration as MM:SS
+                const totalSeconds = Math.floor(data.duration || 0);
+                const minutes = Math.floor(totalSeconds / 60);
+                const seconds = totalSeconds % 60;
+                duration.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+                error.style.display = 'none';
+            } else {
+                btn.className = 'btn-record idle';
+                btnText.textContent = 'REC';
+                dot.className = 'rec-dot';
+
+                // Show final duration if available (just stopped), otherwise show --:--
+                if (data.duration > 0) {
+                    stats.className = 'recording-stats';
+                    const totalSeconds = Math.floor(data.duration);
+                    const minutes = Math.floor(totalSeconds / 60);
+                    const seconds = totalSeconds % 60;
+                    duration.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                } else {
+                    stats.className = 'recording-stats inactive';
+                    duration.textContent = '--:--';
+                }
+            }
+
+            if (data.error) {
+                error.textContent = data.error;
+                error.style.display = 'block';
+            } else {
+                error.style.display = 'none';
+            }
+        }
+
+        async function toggleRecording() {
+            const btn = document.getElementById('recordBtn');
+            btn.disabled = true;
+
+            try {
+                if (isRecording) {
+                    // Stop recording
+                    const response = await fetch('/api/recording/stop', {
+                        method: 'POST'
+                    });
+                    const result = await response.json();
+
+                    if (result.error) {
+                        throw new Error(result.error);
+                    }
+
+                    console.log('Recording stopped:', result);
+                } else {
+                    // Start recording
+                    const response = await fetch('/api/recording/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    const result = await response.json();
+
+                    if (result.error) {
+                        throw new Error(result.error);
+                    }
+
+                    console.log('Recording started:', result);
+                }
+            } catch (e) {
+                console.error('Recording error:', e);
+                document.getElementById('recordingError').textContent = e.message;
+                document.getElementById('recordingError').style.display = 'block';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function connectRecordingSSE() {
+            if (recordingSource) {
+                recordingSource.close();
+            }
+
+            recordingSource = new EventSource('/api/recording/stream');
+
+            recordingSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateRecordingDisplay(data);
+                } catch (e) {
+                    console.error('Recording SSE parse error:', e);
+                }
+            };
+
+            recordingSource.onerror = function() {
+                console.log('Recording SSE error, reconnecting...');
+                setTimeout(connectRecordingSSE, 3000);
+            };
+        }
+
+        // Fetch initial recording status
+        async function fetchRecordingStatus() {
+            try {
+                const response = await fetch('/api/recording/status');
+                const data = await response.json();
+                updateRecordingDisplay(data);
+            } catch (e) {
+                console.error('Failed to fetch recording status:', e);
+            }
+        }
+
+        // Initialize recording
+        fetchRecordingStatus();
+        connectRecordingSSE();
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            stopHeartbeat();
+        });
     </script>
 </body>
 </html>

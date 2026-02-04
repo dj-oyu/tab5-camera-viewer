@@ -28,17 +28,17 @@ M5Stack Tab5でHTTP MJPEGストリームを高速表示するための3ステー
 │                    3-Stage Pipeline                         │
 └─────────────────────────────────────────────────────────────┘
 
-Stage 1: Fetch Task (Priority 6)
-  [HTTP Stream] → [Chunked Decoder] → [Ring Buffer/Linear Buffer]
+Stage 1: Fetch Task (Priority 6, Core 1)
+  [HTTP Stream] → [Chunked Decoder] → [Linear Buffer]
                                               ↓
                                         frameQueue (2 slots)
                                               ↓
-Stage 2: Decode Task (Priority 5)
+Stage 2: Decode Task (Priority 5, Core 0)
   [JPEG HW Decoder] → decode_bufs[0/1]
                                               ↓
                                     decodedFrameQueue (2 slots)
                                               ↓
-Stage 3: Render Task (Priority 5)
+Stage 3: Render Task (Priority 5, Core 1)
   [PPA Transform] → [DSI Transfer] → Display
 ```
 
@@ -59,9 +59,9 @@ Render:                |--R1--|--R2--|--R3--|--R4--|
 ### FrameData (Fetch → Decode)
 ```cpp
 struct FrameData {
-    uint8_t *buf;      // JPEG圧縮データへのポインタ
+    uint8_t *buf;      // JPEG圧縮データへのポインタ (Linear buffer)
     size_t len;        // データ長
-    bool is_linear;    // Linear bufferかring bufferか
+    bool is_linear;    // 常にtrue（現在の実装）
 };
 ```
 
@@ -82,14 +82,13 @@ struct DecodedFrameData {
 ┌──────────────────────────────────────────────────────────┐
 │                    SPIRAM (16MB)                         │
 ├──────────────────────────────────────────────────────────┤
-│ Ring Buffer (8MB)                                        │
-│   - Chunkedストリームの一時保存                          │
-│   - ゼロコピー最適化用                                   │
+│ Linear Buffers [0] (82KB)                                │
+│   - JPEGフレーム格納用                                   │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [0] (4MB)                                 │
-│   - Chunkまたぎフレーム用                                │
+│ Linear Buffers [1] (82KB)                                │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [1] (4MB)                                 │
+│ Linear Buffers [2] (82KB)                                │
+│   - トリプルバッファリング                               │
 ├──────────────────────────────────────────────────────────┤
 │ Decode Buffers [0] (640×480×2 = 614KB)                  │
 │   - JPEG decode出力 (RGB565)                             │
@@ -98,8 +97,7 @@ struct DecodedFrameData {
 │   - ダブルバッファリング                                 │
 ├──────────────────────────────────────────────────────────┤
 │ Device Framebuffer (720×1280×2 = 1.76MB)                │
-│   - M5Unifiedから取得                                     │
-│   - PPAの出力先                                           │
+│   - DSIパネルから取得（シングルバッファ）                │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -108,32 +106,28 @@ struct DecodedFrameData {
 ```
 HTTP Stream
     ↓
-Ring Buffer (8MB) ←─────────┐
-    │                       │
-    │ (ゼロコピー)          │
-    ├─→ frameQueue          │
-    │                       │
-    │ (コピー必要)          │
-    └─→ Linear Buffer [0/1] │
-            ↓               │
-        frameQueue          │
-            ↓               │
-    JPEG Decoder            │
-            ↓               │
-    Decode Buffers [0/1]    │
-            ↓               │
-    decodedFrameQueue       │
-            ↓               │
-    PPA Transform           │
-            ↓               │
-    Device Framebuffer      │
-            ↓               │
-    DSI Transfer            │
-            ↓               │
-        Display             │
-                           │
-    Linear Buffer Pool ────┘
-    (linearFreeQueue)
+Linear Buffer [0/1/2] ←───────────┐
+    │                             │
+    │ (JPEG圧縮データ)            │
+    ↓                             │
+frameQueue                        │
+    ↓                             │
+JPEG Decoder                      │
+    ↓                             │
+Decode Buffers [0/1]              │
+    ↓                             │
+decodedFrameQueue                 │
+    ↓                             │
+PPA Transform                     │
+    ↓                             │
+Device Framebuffer                │
+    ↓                             │
+DSI Transfer                      │
+    ↓                             │
+Display                           │
+                                  │
+Linear Buffer Pool ───────────────┘
+(linearFreeQueue)
 ```
 
 ## 同期メカニズム
@@ -144,7 +138,7 @@ Ring Buffer (8MB) ←─────────┐
 |---------|-------|--------|--------|------|
 | `frameQueue` | 2 | Fetch | Decode | JPEG圧縮データ |
 | `decodedFrameQueue` | 2 | Decode | Render | デコード済みRGB565 |
-| `linearFreeQueue` | 2 | Render | Fetch | Linear buffer再利用 |
+| `linearFreeQueue` | 3 | Render | Fetch | Linear buffer再利用 |
 
 ### セマフォ (FreeRTOS Semaphore)
 
@@ -177,49 +171,6 @@ ISR (PPA Done):
     └─ xSemaphoreGiveFromISR(ppaDoneSema)
 ```
 
-## ゼロコピー最適化
-
-### 条件
-
-1. JPEGフレームが単一chunk内に完結
-2. Ring buffer内で連続領域にある
-3. SOI (0xFFD8) から EOI (0xFFD9) まで途切れない
-
-### 処理フロー
-
-```
-┌─────────────────────────────────────────────────────┐
-│ Chunk内完結?                                        │
-├──────────┬──────────────────────────────────────────┤
-│   YES    │   NO                                     │
-│          │                                          │
-│ ゼロコピー│ コピーモード                             │
-│ Ring Buf │ Linear Buf                               │
-│ を直接参照│ にコピー                                  │
-└──────────┴──────────────────────────────────────────┘
-```
-
-**ゼロコピー時:**
-```cpp
-FrameData fd;
-fd.buf = ring_buf + frame_start_pos;  // ポインタのみ
-fd.len = frame_len;
-fd.is_linear = false;
-xQueueSend(frameQueue, &fd, 0);
-```
-
-**コピー時:**
-```cpp
-// Linear bufferにコピー
-memcpy(linear_buf, ...);
-
-FrameData fd;
-fd.buf = linear_buf;
-fd.len = active_lptr;
-fd.is_linear = true;
-xQueueSend(frameQueue, &fd, 0);
-```
-
 ## Transfer-Encoding: Chunked対応
 
 ### Chunkedフォーマット
@@ -239,9 +190,10 @@ xQueueSend(frameQueue, &fd, 0);
 ### 状態機械
 
 ```cpp
-enum ChunkedState {
+enum class MjpegState {
     CHUNK_SIZE,     // サイズ読み取り中
-    CHUNK_DATA,     // データ読み取り中
+    MJPEG_HEADER,   // Content-Type/Content-Length解析中
+    JPEG_BODY,      // JPEGデータ読み取り中
     CHUNK_TRAILER   // \r\n読み取り中
 };
 ```
@@ -250,15 +202,20 @@ enum ChunkedState {
 
 ```
 CHUNK_SIZE state:
-    ├─ 16進数文字を蓄積 → chunk_size_buf[]
+    ├─ 16進数文字を蓄積
     ├─ '\n'検出 → サイズ解析
-    ├─ chunk_remaining = strtoul(chunk_size_buf, NULL, 16)
-    └─ → CHUNK_DATA state
+    ├─ chunk_remaining = strtoul(...)
+    └─ → MJPEG_HEADER state
 
-CHUNK_DATA state:
-    ├─ データ読み取り
-    ├─ chunk_remaining--
-    └─ chunk_remaining == 0 → CHUNK_TRAILER state
+MJPEG_HEADER state:
+    ├─ Content-Length解析
+    ├─ "\r\n\r\n"検出 → ヘッダ終了
+    └─ → JPEG_BODY state
+
+JPEG_BODY state:
+    ├─ Linear bufferにデータ蓄積
+    ├─ jpeg_remaining == 0 → フレーム完了
+    └─ → CHUNK_TRAILER or MJPEG_HEADER state
 
 CHUNK_TRAILER state:
     ├─ \r\n を読み飛ばし
@@ -308,9 +265,9 @@ FPS = 1000ms / 16ms = 62.5 FPS
 
 **Linear Buffer枯渇:**
 ```cpp
-if (xQueueReceive(linearFreeQueue, &active_lbuf, 0) != pdTRUE) {
-    // バッファなし、次回まで待機
-    // Ring bufferにデータは保持される
+if (!ctx->acquireLinear(&active_buf)) {
+    taskYIELD();
+    continue;  // バッファ確保まで待機
 }
 ```
 
@@ -324,22 +281,23 @@ xQueueSend(frameQueue, &fd, 0);  // タイムアウト0
 
 ### 静的割り当て
 
-- Ring Buffer: 8MB
-- Linear Buffers: 4MB × 2 = 8MB
+- Linear Buffers: 82KB × 3 = 246KB
 - Decode Buffers: 614KB × 2 = 1.2MB
-- Device Framebuffer: 1.76MB (M5Unifiedが管理)
+- Device Framebuffer: 1.76MB (DSIパネルが管理)
 
-**合計: ~19MB (SPIRAM)**
+**合計: ~3.2MB (SPIRAM)**
 
 ### FreeRTOS
 
 - Stack (Fetch Task): 16KB
 - Stack (Decode Task): 16KB
 - Stack (Render Task): 16KB
+- Stack (Detection Task): 16KB
+- Stack (Connection Task): 16KB
 - Queues: < 1KB
 - Semaphores: < 1KB
 
-**合計: ~50KB (RAM)**
+**合計: ~82KB (RAM)**
 
 ## ビルド設定
 
@@ -352,7 +310,7 @@ board = esp32-p4-evboard
 framework = arduino
 ```
 
-### コンパイル時定数
+### コンパイル時定数 (PipelineConfig.h)
 
 ```cpp
 // 解像度
@@ -362,8 +320,8 @@ PANEL_WIDTH = 720
 PANEL_HEIGHT = 1280
 
 // バッファサイズ
-RING_BUF_SIZE = 8MB
-LINEAR_BUF_SIZE = 4MB
+LINEAR_BUF_SIZE = 83558  // 82KB (max 66KB + 25% margin)
+LINEAR_BUF_COUNT = 3     // トリプルバッファ
 DECODE_BUF_SIZE = max(STREAM, PANEL) * 2
 
 // タスク設定
@@ -390,22 +348,6 @@ if (frame_count >= 100) {
 
 - Stream connected - HTTP接続成功
 - Render FPS: XX.X - 100フレームごとのFPS
-
-## 今後の最適化案
-
-1. **デバイスフレームバッファ直接書き込み**
-   - PPAの出力先を`decode_bufs`ではなくデバイスFBへ
-   - 1回のメモリコピー削減
-
-2. **Queue深度の動的調整**
-   - ネットワーク速度に応じてキューサイズ変更
-
-3. **JPEG Decoder並列化**
-   - 複数のdecoder instanceを使用
-
-4. **キャッシュチューニング**
-   - Cache line alignmentの最適化
-   - Prefetch hints
 
 ## 参考資料
 
