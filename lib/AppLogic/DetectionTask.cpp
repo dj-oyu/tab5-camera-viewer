@@ -19,9 +19,6 @@ void parseDetectionJson(const char *json, DetectionData &data) {
     return;
   }
 
-  // Debug: print raw JSON (first 200 chars)
-  Serial.printf("Detection JSON: %.200s\n", json);
-
   data.beginUpdate();
 
   JsonArray detections = doc["detections"];
@@ -44,9 +41,6 @@ void parseDetectionJson(const char *json, DetectionData &data) {
     }
     float confidence = det["confidence"] | 0.0f;
 
-    // Debug: print each detection
-    Serial.printf("  [%d] label='%s' conf=%.2f\n", count, label, confidence);
-
     data.setDetection(count, label, confidence);
     count++;
   }
@@ -54,7 +48,6 @@ void parseDetectionJson(const char *json, DetectionData &data) {
   data.setTimestamp(millis());
 
   data.endUpdate();
-  Serial.printf("Detection parsed: count=%d\n", count);
 }
 
 void detectionTask(void *pvParameters) {
@@ -107,21 +100,30 @@ void detectionTask(void *pvParameters) {
     // Server-Sent Events (SSE) format: "data: {...}\n"
     // Keepalive format: ": keepalive\n"
     uint32_t lastActivity = millis();
+    String lastDataLine;  // Keep only the most recent data line
     while (http.connected() && WiFi.status() == WL_CONNECTED) {
       if (client->available()) {
-        line = client->readStringUntil('\n');
-        line.trim();
-        lastActivity = millis();
-
-        // SSE data line starts with "data: "
-        if (line.startsWith("data: ")) {
-          String jsonStr = line.substring(6); // Remove "data: " prefix
-          if (jsonStr.length() > 0) {
-            parseDetectionJson(jsonStr.c_str(), data);
+        // Read ALL available lines, keep only the LAST "data:" line
+        // This ensures we always display the most recent detection
+        lastDataLine = "";
+        int linesRead = 0;
+        while (client->available()) {
+          line = client->readStringUntil('\n');
+          line.trim();
+          linesRead++;
+          if (line.startsWith("data: ")) {
+            lastDataLine = line.substring(6);
           }
         }
-        // SSE comment (keepalive) starts with ":"
-        // Just acknowledge it to keep connection alive
+        lastActivity = millis();
+
+        // Process only the most recent data line
+        if (lastDataLine.length() > 0) {
+          if (linesRead > 1) {
+            Serial.printf("Detection: processed latest of %d lines\n", linesRead);
+          }
+          parseDetectionJson(lastDataLine.c_str(), data);
+        }
       } else {
         // Check for stream timeout (no data for 60 seconds)
         if (millis() - lastActivity > 60000) {
