@@ -3,6 +3,7 @@
 #include <cstdint>
 
 class DetectionData;
+class ConnectionData;
 
 namespace OverlayRenderer {
 
@@ -14,6 +15,6 @@ void init(uint16_t *framebuffer);
 // - Framebuffer bottom (rows 1120-1279) → USB side (left)
 
 // Render both overlay bars
-void render(DetectionData &data);
+void render(DetectionData &detectionData, ConnectionData &connectionData);
 
 } // namespace OverlayRenderer

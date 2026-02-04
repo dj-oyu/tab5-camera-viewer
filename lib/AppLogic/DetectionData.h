@@ -4,7 +4,7 @@
 #include <freertos/semphr.h>
 #include <cstdint>
 
-constexpr int MAX_DETECTIONS = 8;
+constexpr int MAX_DETECTIONS = 12;
 constexpr int MAX_LABEL_LEN = 32;
 
 struct Detection {

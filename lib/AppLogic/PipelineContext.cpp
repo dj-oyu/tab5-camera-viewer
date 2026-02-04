@@ -53,6 +53,11 @@ bool PipelineContext::init() {
     return false;
   }
 
+  if (!connection_data_.init()) {
+    Serial.println("Failed to init ConnectionData");
+    return false;
+  }
+
   return true;
 }
 
