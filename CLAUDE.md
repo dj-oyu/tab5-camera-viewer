@@ -21,10 +21,10 @@ Create `.env` file in project root (loaded by `env_loader.py` as build flags):
 ```
 WIFI_SSID="<ssid>"
 WIFI_PASS="<password>"
-MJPEG_URL="http://<server>:8082/stream"
-DETECTION_URL="https://<server>:8080/api/detections/stream?format=json"
-CONNECTIONS_URL="https://<server>:8080/api/connections/stream"
-RECORDING_BASE_URL="https://<server>:8080/api/recording"
+MJPEG_URL="http://<server>/stream"
+DETECTION_URL="http://<server>/api/detections/stream?format=json"
+CONNECTIONS_URL="http://<server>/api/connections/stream"
+RECORDING_BASE_URL="http://<server>/api/recording"
 ```
 
 ## Architecture
@@ -85,6 +85,9 @@ cd research/ui-simulator && uv run app.py
 - **実装後のドキュメント更新**: アーキテクチャやバッファ構成を変更した場合は、`docs/` 配下のドキュメントも必ず更新すること
   - `docs/pipeline-architecture.md` - パイプライン構造、メモリレイアウト
   - `docs/task-interactions.md` - タスク間通信、キュー/セマフォ
+- **gitブランチルール**: `main`はプロテクションあり PRでしかマージできない
+  - Gitflowに準拠
+  - edit, writeを伴うタスクでは最初に今いるブランチが最適かどうか**必ずチェック**
 
 ## Detailed Documentation
 
