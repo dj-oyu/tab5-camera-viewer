@@ -7,13 +7,8 @@
 #include <M5GFX.h>
 #include <cstring>
 #include <esp_cache.h>
-#include <esp_heap_caps.h>
 
 namespace {
-
-// Pre-calculated framebuffer addresses
-uint16_t *topBar = nullptr;     // Camera side (rows 0-159) - Right in landscape
-uint16_t *bottomBar = nullptr;  // USB side (rows 1120-1279) - Left in landscape
 
 // Tile-based sprite in internal SRAM for rotated text rendering
 // Bar: 160px wide × 720px long (in landscape)
@@ -49,8 +44,21 @@ constexpr uint16_t REC_IDLE_COLOR = 0x4208;  // Dark gray for idle REC
 // Detection display timeout (clear display if no data for this long)
 constexpr uint32_t DETECTION_DISPLAY_TIMEOUT_MS = 3000;
 
-// State tracking for optimized rendering
-int prevDetectionCount = 0;
+struct OverlayBufferSnapshot {
+  uint16_t *framebuffer = nullptr;
+  bool bars_initialized = false;
+  int detection_count = -1;
+  int conn_total = -1;
+  int conn_webrtc = -1;
+  int conn_mjpeg = -1;
+  ConnectionState conn_state = ConnectionState::Connecting;
+  int conn_http_code = 0;
+  RecordingState rec_state = RecordingState::Idle;
+  int rec_duration_sec = -1;
+  bool rec_blink = true;
+};
+
+OverlayBufferSnapshot overlay_snapshots[RENDER_BUF_COUNT];
 uint32_t lastDetectionTime = 0;
 int cachedConnectionTotal = 0;
 int cachedConnectionWebrtc = 0;
@@ -63,6 +71,27 @@ RecordingState cachedRecordingState = RecordingState::Idle;
 float cachedRecordingDuration = 0.0f;
 uint32_t lastRecordingBlinkTime = 0;
 bool recordingBlinkOn = true;
+
+OverlayBufferSnapshot &snapshotFor(uint16_t *framebuffer) {
+  for (int i = 0; i < RENDER_BUF_COUNT; ++i) {
+    if (overlay_snapshots[i].framebuffer == framebuffer) {
+      return overlay_snapshots[i];
+    }
+  }
+
+  for (int i = 0; i < RENDER_BUF_COUNT; ++i) {
+    if (overlay_snapshots[i].framebuffer == nullptr) {
+      overlay_snapshots[i] = {};
+      overlay_snapshots[i].framebuffer = framebuffer;
+      return overlay_snapshots[i];
+    }
+  }
+
+  // Should not happen with RENDER_BUF_COUNT framebuffers, fallback to slot 0.
+  overlay_snapshots[0] = {};
+  overlay_snapshots[0].framebuffer = framebuffer;
+  return overlay_snapshots[0];
+}
 
 // Calculate Y position for a row within a tile
 int getRowY(int rowIndex) {
@@ -270,12 +299,9 @@ void copyTileToBar(uint16_t *bar, int tileIndex) {
 
 } // namespace
 
-void OverlayRenderer::init(uint16_t *framebuffer) {
-  if (topBar != nullptr)
+void OverlayRenderer::init() {
+  if (initialized)
     return;
-
-  topBar = framebuffer;
-  bottomBar = framebuffer + (PANEL_HEIGHT - OVERLAY_BAR_SIZE) * PANEL_WIDTH;
 
   // Create tile sprite in internal SRAM
   // Sprite: 160(W) x 240(H) with rotation 3
@@ -291,40 +317,43 @@ void OverlayRenderer::init(uint16_t *framebuffer) {
   Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, internal SRAM)\n",
                 TILE_HEIGHT, TILE_WIDTH);
 
-  // Clear bars initially (dark gray background)
-  for (int y = 0; y < OVERLAY_BAR_SIZE; y++) {
-    for (int x = 0; x < PANEL_WIDTH; x++) {
-      topBar[y * PANEL_WIDTH + x] = BG_COLOR;
-      bottomBar[y * PANEL_WIDTH + x] = BG_COLOR;
-    }
-  }
-  esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-  esp_cache_msync(bottomBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-
   initialized = true;
   lastDetectionTime = millis();
-  Serial.printf("OverlayRenderer: top=%p, bottom=%p, initialized\n",
-                topBar, bottomBar);
+  Serial.println("OverlayRenderer: initialized");
 }
 
 void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &connectionData,
-                             RecordingData &recordingData) {
-  if (!initialized)
+                             RecordingData &recordingData,
+                             uint16_t *framebuffer) {
+  if (!initialized || framebuffer == nullptr)
     return;
+
+  uint16_t *topBar = framebuffer;
+  uint16_t *bottomBar = framebuffer + (PANEL_HEIGHT - OVERLAY_BAR_SIZE) * PANEL_WIDTH;
+
+  OverlayBufferSnapshot &snapshot = snapshotFor(framebuffer);
+  if (!snapshot.bars_initialized) {
+    for (int y = 0; y < OVERLAY_BAR_SIZE; ++y) {
+      for (int x = 0; x < PANEL_WIDTH; ++x) {
+        topBar[y * PANEL_WIDTH + x] = BG_COLOR;
+        bottomBar[y * PANEL_WIDTH + x] = BG_COLOR;
+      }
+    }
+    esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_cache_msync(bottomBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    snapshot.bars_initialized = true;
+  }
 
   // Read detection data
   static Detection cachedDetections[MAX_DETECTIONS];
   static int cachedCount = 0;
-  static uint32_t cachedTimestamp = 0;
 
   Detection detections[MAX_DETECTIONS];
   int count = 0;
-  uint32_t timestamp = 0;
 
-  if (detectionData.tryRead(detections, &count, &timestamp)) {
+  if (detectionData.tryRead(detections, &count, nullptr)) {
     memcpy(cachedDetections, detections, sizeof(Detection) * count);
     cachedCount = count;
-    cachedTimestamp = timestamp;
     lastDetectionTime = millis();
   }
 
@@ -372,95 +401,66 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   }
 
   // === RIGHT BAR (Camera side, top in framebuffer) - Connection Count ===
-  // Process this FIRST, independent of detection updates
-  static bool rightBarInitialized = false;
-  static int prevConnTotal = -1;
-  static int prevConnWebrtc = -1;
-  static int prevConnMjpeg = -1;
-  static ConnectionState prevConnState = ConnectionState::Connecting;
-  static int prevConnHttpCode = 0;
+  bool connChanged = (cachedConnectionTotal != snapshot.conn_total ||
+                      cachedConnectionWebrtc != snapshot.conn_webrtc ||
+                      cachedConnectionMjpeg != snapshot.conn_mjpeg ||
+                      cachedConnectionState != snapshot.conn_state ||
+                      cachedConnectionHttpCode != snapshot.conn_http_code);
 
-  bool connChanged = (cachedConnectionTotal != prevConnTotal ||
-                      cachedConnectionWebrtc != prevConnWebrtc ||
-                      cachedConnectionMjpeg != prevConnMjpeg ||
-                      cachedConnectionState != prevConnState ||
-                      cachedConnectionHttpCode != prevConnHttpCode);
+  const int recDurationSec = static_cast<int>(recDuration);
+  bool recChanged =
+      (recState != snapshot.rec_state ||
+       recDurationSec != snapshot.rec_duration_sec ||
+       ((recState == RecordingState::Recording ||
+         recState == RecordingState::Pending) &&
+        recordingBlinkOn != snapshot.rec_blink));
 
-  // Track recording state changes
-  static RecordingState prevRecState = RecordingState::Idle;
-  static float prevRecDuration = 0.0f;
-  static bool prevBlinkState = true;
-
-  bool recChanged = (recState != prevRecState ||
-                     (int)recDuration != (int)prevRecDuration ||
-                     ((recState == RecordingState::Recording || recState == RecordingState::Pending) &&
-                      recordingBlinkOn != prevBlinkState));
-
-  if (!rightBarInitialized || connChanged) {
+  if (connChanged) {
     renderConnectionTile();
     copyTileToBar(topBar, 0);
-
-    // Clear tile 1 (only once)
-    if (!rightBarInitialized) {
-      tileSprite.fillSprite(BG_COLOR);
-      copyTileToBar(topBar, 1);
-    }
   }
 
-  // Render recording tile (Tile 2) when state changes or blink toggles
-  if (!rightBarInitialized || recChanged) {
+  if (recChanged) {
     renderRecordingTile();
     copyTileToBar(topBar, 2);
-    prevRecState = recState;
-    prevRecDuration = recDuration;
-    prevBlinkState = recordingBlinkOn;
   }
 
-  if (!rightBarInitialized || connChanged || recChanged) {
+  if (connChanged || recChanged) {
+    tileSprite.fillSprite(BG_COLOR);
+    copyTileToBar(topBar, 1);
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    rightBarInitialized = true;
-
-    if (connChanged) {
-      prevConnTotal = cachedConnectionTotal;
-      prevConnWebrtc = cachedConnectionWebrtc;
-      prevConnMjpeg = cachedConnectionMjpeg;
-      prevConnState = cachedConnectionState;
-      prevConnHttpCode = cachedConnectionHttpCode;
-      if (cachedConnectionState == ConnectionState::Error) {
-        Serial.printf("OverlayRenderer: Connection error: httpCode=%d\n", cachedConnectionHttpCode);
-      } else if (cachedConnectionState == ConnectionState::Connecting) {
-        Serial.println("OverlayRenderer: Connection connecting...");
-      } else {
-        Serial.printf("OverlayRenderer: Connection updated: %d/%d/%d\n",
-                      cachedConnectionTotal, cachedConnectionWebrtc, cachedConnectionMjpeg);
-      }
-    }
+    snapshot.conn_total = cachedConnectionTotal;
+    snapshot.conn_webrtc = cachedConnectionWebrtc;
+    snapshot.conn_mjpeg = cachedConnectionMjpeg;
+    snapshot.conn_state = cachedConnectionState;
+    snapshot.conn_http_code = cachedConnectionHttpCode;
+    snapshot.rec_state = recState;
+    snapshot.rec_duration_sec = recDurationSec;
+    snapshot.rec_blink = recordingBlinkOn;
   }
 
   // === LEFT BAR (USB side, bottom in framebuffer) - Detection List ===
-  // Calculate which tiles need updating
   int currTiles = (cachedCount + ROWS_PER_TILE - 1) / ROWS_PER_TILE;  // Round up
-  int prevTiles = (prevDetectionCount + ROWS_PER_TILE - 1) / ROWS_PER_TILE;
+  int prevCount = snapshot.detection_count < 0 ? 0 : snapshot.detection_count;
+  int prevTiles = (prevCount + ROWS_PER_TILE - 1) / ROWS_PER_TILE;
   int tilesToUpdate = max(currTiles, prevTiles);
+  bool detectionChanged =
+      (snapshot.detection_count < 0 || cachedCount != snapshot.detection_count);
 
-  // Only render if detection count changed
-  if (cachedCount == prevDetectionCount && tilesToUpdate == 0) {
-    return;  // No detection changes, skip left bar render
-  }
-
-  for (int i = 0; i < tilesToUpdate; i++) {
-    renderDetectionTile(i, cachedDetections, cachedCount);
-    copyTileToBar(bottomBar, i);
-  }
-
-  // Clear remaining tiles if detection count decreased
-  if (currTiles < prevTiles) {
-    for (int i = currTiles; i < prevTiles; i++) {
-      tileSprite.fillSprite(BG_COLOR);
+  if (detectionChanged || currTiles != prevTiles) {
+    for (int i = 0; i < tilesToUpdate; ++i) {
+      renderDetectionTile(i, cachedDetections, cachedCount);
       copyTileToBar(bottomBar, i);
     }
-  }
 
-  esp_cache_msync(bottomBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-  prevDetectionCount = cachedCount;
+    if (currTiles < prevTiles) {
+      for (int i = currTiles; i < prevTiles; ++i) {
+        tileSprite.fillSprite(BG_COLOR);
+        copyTileToBar(bottomBar, i);
+      }
+    }
+
+    esp_cache_msync(bottomBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    snapshot.detection_count = cachedCount;
+  }
 }

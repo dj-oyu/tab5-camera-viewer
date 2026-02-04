@@ -65,8 +65,7 @@ void detectionTask(void *pvParameters) {
   HTTPClient http;
   String line;
   line.reserve(1024);
-
-  Serial.printf("DetectionTask: URL = %s\n", DETECTION_URL);
+  uint32_t lastAppliedAt = 0;
 
   while (1) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -75,15 +74,11 @@ void detectionTask(void *pvParameters) {
       continue;
     }
 
-    Serial.println("DetectionTask: begin()...");
     http.begin(httpClient, DETECTION_URL);
     http.setTimeout(DETECTION_TIMEOUT_MS);
     http.setReuse(false);  // Don't reuse connection for SSE
 
-    Serial.println("DetectionTask: GET()...");
-    uint32_t startTime = millis();
     int httpCode = http.GET();
-    Serial.printf("DetectionTask: GET() took %lu ms, code=%d\n", millis() - startTime, httpCode);
     if (httpCode != 200) {
       Serial.printf("Detection HTTP failed: %d\n", httpCode);
       http.end();
@@ -117,10 +112,13 @@ void detectionTask(void *pvParameters) {
 
         // Process only the most recent data line
         if (lastDataLine.length() > 0) {
-          if (linesRead > 1) {
-            Serial.printf("Detection: processed latest of %d lines\n", linesRead);
+          SideLoadProfile profile = ctx->sideLoadProfile();
+          uint32_t now = millis();
+          if (profile.detection_min_interval_ms == 0 ||
+              (now - lastAppliedAt) >= profile.detection_min_interval_ms) {
+            parseDetectionJson(lastDataLine.c_str(), data);
+            lastAppliedAt = now;
           }
-          parseDetectionJson(lastDataLine.c_str(), data);
         }
       } else {
         // Check for stream timeout (no data for 60 seconds)

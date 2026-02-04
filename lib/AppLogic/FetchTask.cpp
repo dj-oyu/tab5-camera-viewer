@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <esp_heap_caps.h>
+#include <esp_rom_sys.h>
+#include <esp_timer.h>
 
 namespace {
 
@@ -23,19 +26,56 @@ struct MjpegParser {
   uint32_t chunk_remaining = 0;   // remaining bytes in current chunk
   uint32_t content_length = 0;    // parsed Content-Length
   uint32_t jpeg_remaining = 0;    // remaining JPEG bytes
+  uint8_t trailer_remaining = 0;  // remaining trailer bytes (CRLF)
   char header_buf[HEADER_BUF_SIZE];
   uint8_t header_idx = 0;
   uint32_t write_ptr = 0;
+  bool frame_overflow = false;
 
   void reset() {
     state = MjpegState::CHUNK_SIZE;
     chunk_remaining = 0;
     content_length = 0;
     jpeg_remaining = 0;
+    trailer_remaining = 0;
     header_idx = 0;
     write_ptr = 0;
+    frame_overflow = false;
+  }
+
+  void resetFrameState() {
+    content_length = 0;
+    jpeg_remaining = 0;
+    write_ptr = 0;
+    frame_overflow = false;
+  }
+
+  void enterChunkTrailer() {
+    state = MjpegState::CHUNK_TRAILER;
+    trailer_remaining = 2;
+    header_idx = 0;
   }
 };
+
+struct FetchPerfStats {
+  uint32_t frames = 0;
+  uint32_t queue_drops = 0;
+  uint32_t parser_resets = 0;
+  uint32_t oversize_drops = 0;
+  uint32_t no_linear_waits = 0;
+  uint64_t parse_us = 0;
+  uint64_t sync_us = 0;
+  uint64_t idle_wait_us = 0;
+  uint64_t read_bytes = 0;
+  uint64_t frame_bytes = 0;
+  uint64_t bytes_per_read_acc = 0;
+  uint32_t read_calls = 0;
+};
+
+bool isHexDigit(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+         (c >= 'A' && c <= 'F');
+}
 
 void padAndSync(uint8_t *buf, size_t len) {
   size_t pad_len = (len + BITSTREAM_PAD + 63) & ~63;
@@ -44,37 +84,44 @@ void padAndSync(uint8_t *buf, size_t len) {
                   ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 }
 
-void submitFrame(PipelineContext &ctx, uint8_t *buf, size_t len) {
+bool submitFrame(PipelineContext &ctx, uint8_t *buf, size_t len) {
   FrameData fd;
   fd.buf = buf;
   fd.len = len;
   fd.is_linear = true;
-  xQueueSend(ctx.frameQueue(), &fd, 0);
+  return xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) == pdTRUE;
 }
 
 void initWiFi() {
 #ifdef WIFI_SSID
   WiFi.setPins(12, 13, 11, 10, 9, 8, 15);
+  WiFi.setSleep(false); // keep radio active for stable throughput
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED) {
     delay(100);
     Serial.print(".");
   }
-  Serial.println("\nWiFi Connected");
+  Serial.printf("\nWiFi Connected (RSSI=%d dBm)\n", WiFi.RSSI());
 #endif
 }
 
-// Parse stream and fill buffer, returns true when frame is complete
-bool parseStream(Stream &stream, MjpegParser &parser, uint8_t *linear_buf) {
-  while (stream.available() > 0) {
+// Parse byte stream and fill buffer.
+// consumed_out is always set to consumed byte count from [data, len).
+// Returns true when one JPEG frame is complete.
+bool parseBytes(const uint8_t *data, size_t len, MjpegParser &parser,
+                uint8_t *linear_buf, size_t *consumed_out) {
+  size_t idx = 0;
+
+  while (idx < len) {
     switch (parser.state) {
 
     case MjpegState::CHUNK_SIZE: {
-      while (stream.available() > 0 && parser.header_idx < 16) {
-        char c = stream.read();
+      while (idx < len) {
+        char c = static_cast<char>(data[idx++]);
 
-        if (c == '\r')
+        if (c == '\r') {
           continue;
+        }
 
         if (c == '\n') {
           parser.header_buf[parser.header_idx] = '\0';
@@ -84,106 +131,136 @@ bool parseStream(Stream &stream, MjpegParser &parser, uint8_t *linear_buf) {
 
             if (parser.chunk_remaining == 0) {
               // terminal chunk
+              if (consumed_out) {
+                *consumed_out = idx;
+              }
               return false;
             }
 
-            // decide next state
             parser.state = (parser.jpeg_remaining > 0) ? MjpegState::JPEG_BODY
-                                                       : MjpegState::MJPEG_HEADER;
+                                                        : MjpegState::MJPEG_HEADER;
           }
           break;
         }
 
-        // accumulate hex digits
-        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-            (c >= 'A' && c <= 'F')) {
-          if (parser.header_idx < 15) {
-            parser.header_buf[parser.header_idx++] = c;
-          }
+        if (isHexDigit(c) && parser.header_idx < 15) {
+          parser.header_buf[parser.header_idx++] = c;
         }
       }
       break;
     }
 
     case MjpegState::MJPEG_HEADER: {
-      while (stream.available() > 0 && parser.chunk_remaining > 0 &&
-             parser.header_idx < HEADER_BUF_SIZE - 1) {
-        char c = stream.read();
-        parser.header_buf[parser.header_idx++] = c;
+      while (idx < len && parser.chunk_remaining > 0) {
+        char c = static_cast<char>(data[idx++]);
         parser.chunk_remaining--;
 
-        // detect "\r\n\r\n" (header end)
+        if (parser.header_idx < HEADER_BUF_SIZE - 1) {
+          parser.header_buf[parser.header_idx++] = c;
+        } else {
+          // Keep a sliding window to avoid hard-failing on longer headers.
+          memmove(parser.header_buf, parser.header_buf + 1, HEADER_BUF_SIZE - 2);
+          parser.header_buf[HEADER_BUF_SIZE - 2] = c;
+          parser.header_idx = HEADER_BUF_SIZE - 1;
+        }
+
         if (parser.header_idx >= 4) {
           char *end = parser.header_buf + parser.header_idx;
           if (end[-4] == '\r' && end[-3] == '\n' && end[-2] == '\r' &&
               end[-1] == '\n') {
-            // extract Content-Length
             parser.header_buf[parser.header_idx] = '\0';
+
             char *cl = strstr(parser.header_buf, "Content-Length:");
+            if (!cl) {
+              cl = strstr(parser.header_buf, "content-length:");
+            }
             if (cl) {
               parser.content_length = strtoul(cl + 15, nullptr, 10);
               parser.jpeg_remaining = parser.content_length;
+            } else {
+              parser.content_length = 0;
+              parser.jpeg_remaining = 0;
             }
 
             parser.header_idx = 0;
+            parser.frame_overflow = false;
             parser.state = MjpegState::JPEG_BODY;
             break;
           }
         }
       }
 
-      // chunk exhausted but header incomplete
-      if (parser.chunk_remaining == 0 &&
-          parser.state == MjpegState::MJPEG_HEADER) {
-        parser.state = MjpegState::CHUNK_TRAILER;
+      if (parser.state == MjpegState::MJPEG_HEADER && parser.chunk_remaining == 0) {
+        parser.enterChunkTrailer();
       }
       break;
     }
 
     case MjpegState::JPEG_BODY: {
-      // calculate bytes to read
-      uint32_t to_read =
-          std::min({parser.chunk_remaining, parser.jpeg_remaining,
-                    static_cast<uint32_t>(stream.available()),
-                    LINEAR_BUF_SIZE - parser.write_ptr});
+      if (parser.jpeg_remaining == 0 || parser.content_length == 0) {
+        parser.state = MjpegState::MJPEG_HEADER;
+        parser.header_idx = 0;
+        break;
+      }
 
-      if (to_read > 0) {
-        // zero-copy direct read to linear buffer
-        int bytes_read =
-            stream.readBytes(linear_buf + parser.write_ptr, to_read);
+      size_t payload = std::min<size_t>(len - idx,
+                                        std::min(parser.chunk_remaining,
+                                                 parser.jpeg_remaining));
+      if (payload == 0) {
+        if (parser.chunk_remaining == 0) {
+          parser.enterChunkTrailer();
+        }
+        break;
+      }
 
-        if (bytes_read > 0) {
-          parser.write_ptr += bytes_read;
-          parser.chunk_remaining -= bytes_read;
-          parser.jpeg_remaining -= bytes_read;
+      size_t writable = LINEAR_BUF_SIZE - parser.write_ptr;
+      size_t copy_bytes = 0;
+      if (!parser.frame_overflow) {
+        copy_bytes = std::min(payload, writable);
+        if (copy_bytes > 0) {
+          memcpy(linear_buf + parser.write_ptr, data + idx, copy_bytes);
+          parser.write_ptr += copy_bytes;
+        }
+        if (copy_bytes < payload) {
+          parser.frame_overflow = true;
         }
       }
 
-      // frame complete check
+      idx += payload;
+      parser.chunk_remaining -= payload;
+      parser.jpeg_remaining -= payload;
+
       if (parser.jpeg_remaining == 0 && parser.content_length > 0) {
-        // next frame state transition
         if (parser.chunk_remaining > 0) {
-          // next MJPEG header in same chunk
           parser.state = MjpegState::MJPEG_HEADER;
           parser.header_idx = 0;
         } else {
-          parser.state = MjpegState::CHUNK_TRAILER;
+          parser.enterChunkTrailer();
         }
-        return true; // frame complete
+
+        if (consumed_out) {
+          *consumed_out = idx;
+        }
+        return true;
       }
 
-      // chunk exhausted but JPEG incomplete
       if (parser.chunk_remaining == 0) {
-        parser.state = MjpegState::CHUNK_TRAILER;
+        parser.enterChunkTrailer();
       }
       break;
     }
 
     case MjpegState::CHUNK_TRAILER: {
-      // skip "\r\n"
-      if (stream.available() >= 2) {
-        stream.read(); // '\r'
-        stream.read(); // '\n'
+      if (parser.trailer_remaining == 0) {
+        parser.state = MjpegState::CHUNK_SIZE;
+        parser.header_idx = 0;
+        break;
+      }
+
+      size_t skip = std::min<size_t>(len - idx, parser.trailer_remaining);
+      idx += skip;
+      parser.trailer_remaining -= skip;
+      if (parser.trailer_remaining == 0) {
         parser.state = MjpegState::CHUNK_SIZE;
         parser.header_idx = 0;
       }
@@ -191,7 +268,43 @@ bool parseStream(Stream &stream, MjpegParser &parser, uint8_t *linear_buf) {
     }
     }
   }
-  return false; // frame not complete
+
+  if (consumed_out) {
+    *consumed_out = idx;
+  }
+  return false;
+}
+
+void logFetchPerf(const FetchPerfStats &perf, uint32_t window_ms,
+                  const PipelineContext &ctx) {
+  if (window_ms == 0) {
+    return;
+  }
+
+  float window_sec = window_ms / 1000.0f;
+  float fetch_mbps = (window_sec > 0.0f)
+                         ? (perf.read_bytes * 8.0f) / (window_sec * 1000000.0f)
+                         : 0.0f;
+  float fps = (window_sec > 0.0f) ? (perf.frames / window_sec) : 0.0f;
+  uint64_t avg_frame_bytes = (perf.frames > 0) ? (perf.frame_bytes / perf.frames) : 0;
+  uint64_t bytes_per_read =
+      (perf.read_calls > 0) ? (perf.bytes_per_read_acc / perf.read_calls) : 0;
+  uint64_t frame_div = (perf.frames > 0) ? perf.frames : 1;
+  uint64_t read_div = (perf.read_calls > 0) ? perf.read_calls : 1;
+
+  Serial.printf("MJPEG FPS: %.1f\n", fps);
+  Serial.printf(
+      "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
+      "sync=%lluus idle=%lluus reads=%u drops=%u ovf=%u reset=%u no_buf=%u "
+      "queues(frame=%u linear=%u)\n",
+      fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
+      static_cast<unsigned long long>(bytes_per_read),
+      static_cast<unsigned long long>(perf.parse_us / frame_div),
+      static_cast<unsigned long long>(perf.sync_us / frame_div),
+      static_cast<unsigned long long>(perf.idle_wait_us / read_div),
+      perf.read_calls, perf.queue_drops, perf.oversize_drops, perf.parser_resets,
+      perf.no_linear_waits, uxQueueMessagesWaiting(ctx.frameQueue()),
+      uxQueueMessagesWaiting(ctx.linearFreeQueue()));
 }
 
 void fetchTask(void *pvParameters) {
@@ -201,6 +314,30 @@ void fetchTask(void *pvParameters) {
 #ifdef MJPEG_URL
   HTTPClient http;
   MjpegParser parser;
+  static uint8_t *rx_buf = nullptr;
+  static bool rx_buf_internal = false;
+  if (!rx_buf) {
+    rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+        64, FETCH_RX_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    rx_buf_internal = rx_buf != nullptr;
+    if (!rx_buf) {
+      rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+          64, FETCH_RX_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+    if (!rx_buf) {
+      rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
+          64, FETCH_RX_BUF_SIZE, MALLOC_CAP_8BIT));
+    }
+    if (!rx_buf) {
+      Serial.printf("Failed to allocate fetch RX buffer (%lu bytes)\n",
+                    static_cast<unsigned long>(FETCH_RX_BUF_SIZE));
+      vTaskDelete(nullptr);
+      return;
+    }
+    Serial.printf("Fetch RX buffer: %p (%s, %lu bytes)\n", rx_buf,
+                  rx_buf_internal ? "INTERNAL" : "SPIRAM/GENERIC",
+                  static_cast<unsigned long>(FETCH_RX_BUF_SIZE));
+  }
 
   while (1) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -221,43 +358,93 @@ void fetchTask(void *pvParameters) {
     }
 
     Serial.println("Stream connected");
-    auto &stream = http.getStream();
-    stream.setTimeout(1000);
+    WiFiClient &stream = http.getStream();
+    stream.setTimeout(1);
 
     uint32_t last_data_time = millis();
     uint32_t last_frame_time = millis();
+    uint32_t perf_window_start = millis();
+    FetchPerfStats perf;
     uint8_t *active_buf = nullptr;
     parser.reset();
 
     while (http.connected()) {
-      // acquire buffer if not held
       if (!active_buf) {
         if (!ctx->acquireLinear(&active_buf)) {
+          perf.no_linear_waits++;
           taskYIELD();
+          esp_rom_delay_us(FETCH_IDLE_BACKOFF_US);
           continue;
         }
         parser.write_ptr = 0;
       }
 
-      bool frame_complete = parseStream(stream, parser, active_buf);
+      int64_t read_start = esp_timer_get_time();
+      int bytes_read = stream.read(rx_buf, FETCH_RX_BUF_SIZE);
+      uint64_t read_us = static_cast<uint64_t>(esp_timer_get_time() - read_start);
 
-      if (frame_complete) {
-        padAndSync(active_buf, parser.write_ptr);
-        submitFrame(*ctx, active_buf, parser.write_ptr);
-        last_frame_time = millis();
-
-        active_buf = nullptr; // get new buffer next iteration
-        parser.content_length = 0;
-        parser.jpeg_remaining = 0;
-        parser.write_ptr = 0;
-      }
-
-      // update data timestamp
-      if (stream.available() > 0) {
+      if (bytes_read > 0) {
+        perf.read_calls++;
+        perf.read_bytes += static_cast<uint32_t>(bytes_read);
+        perf.bytes_per_read_acc += static_cast<uint32_t>(bytes_read);
         last_data_time = millis();
+
+        size_t offset = 0;
+        while (offset < static_cast<size_t>(bytes_read)) {
+          size_t consumed = 0;
+          int64_t parse_start = esp_timer_get_time();
+          bool frame_complete = parseBytes(
+              rx_buf + offset, static_cast<size_t>(bytes_read) - offset, parser,
+              active_buf, &consumed);
+          perf.parse_us +=
+              static_cast<uint64_t>(esp_timer_get_time() - parse_start);
+
+          if (consumed == 0) {
+            perf.parser_resets++;
+            parser.reset();
+            break;
+          }
+          offset += consumed;
+
+          if (frame_complete) {
+            if (parser.frame_overflow) {
+              perf.oversize_drops++;
+              ctx->releaseLinear(active_buf);
+            } else {
+              int64_t sync_start = esp_timer_get_time();
+              padAndSync(active_buf, parser.write_ptr);
+              perf.sync_us +=
+                  static_cast<uint64_t>(esp_timer_get_time() - sync_start);
+              perf.frame_bytes += parser.write_ptr;
+
+              if (!submitFrame(*ctx, active_buf, parser.write_ptr)) {
+                perf.queue_drops++;
+                ctx->releaseLinear(active_buf);
+              }
+            }
+
+            perf.frames++;
+            last_frame_time = millis();
+            active_buf = nullptr;
+            parser.resetFrameState();
+
+            if (offset < static_cast<size_t>(bytes_read)) {
+              if (!ctx->acquireLinear(&active_buf)) {
+                perf.no_linear_waits++;
+                perf.parser_resets++;
+                parser.reset();
+                break;
+              }
+              parser.write_ptr = 0;
+            }
+          }
+        }
+      } else {
+        perf.idle_wait_us += read_us;
+        taskYIELD();
+        esp_rom_delay_us(FETCH_IDLE_BACKOFF_US);
       }
 
-      // timeout detection
       uint32_t now = millis();
       if (now - last_data_time > 5000) {
         Serial.println("Fetcher: Data Timeout!");
@@ -268,10 +455,12 @@ void fetchTask(void *pvParameters) {
         break;
       }
 
-      if (stream.available() == 0) {
-        taskYIELD();
-      } else {
-        taskYIELD();
+      if (perf.frames >= PERF_LOG_WINDOW_FRAMES ||
+          (now - perf_window_start) >= PERF_LOG_INTERVAL_MS) {
+        uint32_t window_ms = now - perf_window_start;
+        logFetchPerf(perf, window_ms, *ctx);
+        perf = {};
+        perf_window_start = now;
       }
     }
 

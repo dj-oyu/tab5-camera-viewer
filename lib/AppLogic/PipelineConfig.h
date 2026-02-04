@@ -19,7 +19,18 @@ constexpr uint32_t DECODE_BUF_SIZE =
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
 constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ
+constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 2; // Linear bufferのうち内部SRAM優先数
+constexpr uint32_t INTERNAL_CACHE_GUARD_BYTES = 128 * 1024; // 内部SRAMを使い切らないための最低確保量
 constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
+constexpr uint32_t RENDER_BUF_COUNT = 2;      // Display submit用ダブルバッファ
+constexpr uint32_t FETCH_RX_BUF_SIZE = 16384; // Fetch socket read size (internal SRAM cache)
+constexpr uint32_t FETCH_IDLE_BACKOFF_US = 200;
+
+// Performance logging / control
+constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
+constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
+constexpr float FPS_THROTTLE_ON = 28.0f;
+constexpr float FPS_THROTTLE_OFF = 29.5f;
 
 // Overlay configuration (for landscape viewing)
 constexpr uint32_t OVERLAY_BAR_SIZE = 160;    // 黒帯サイズ (top/bottom in framebuffer)
