@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detection Overlay UI Simulator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 20px;
+            color: #00d4ff;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #2a2a4e;
+            border-radius: 8px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #666;
+        }
+
+        .status-dot.connected {
+            background: #00ff88;
+            box-shadow: 0 0 8px #00ff88;
+        }
+
+        .status-dot.disconnected {
+            background: #ff4444;
+        }
+
+        .display-wrapper {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        /* Fixed-size display container for scaling */
+        .display-scaler {
+            /* Native display size: 1280x720 + border */
+            width: 1288px;
+            height: 728px;
+            transform-origin: center center;
+        }
+
+        /* Simulated display (landscape view) - FIXED SIZE */
+        .display {
+            display: flex;
+            width: 1280px;
+            height: 720px;
+            background: #000;
+            border: 4px solid #444;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+            /* Prevent any flex shrinking */
+            flex-shrink: 0;
+        }
+
+        .overlay-bar {
+            /* Fixed width: 160px (12.5% of 1280) */
+            width: 160px;
+            min-width: 160px;
+            max-width: 160px;
+            height: 720px;
+            background: #000;
+            display: flex;
+            flex-direction: column;
+            padding: 10px;
+            font-family: monospace;
+            flex-shrink: 0;
+        }
+
+        .overlay-bar.left {
+            border-right: 1px solid #333;
+        }
+
+        .overlay-bar.right {
+            border-left: 1px solid #333;
+        }
+
+        .video-area {
+            /* Fixed width: 960px (75% of 1280) */
+            width: 960px;
+            min-width: 960px;
+            max-width: 960px;
+            height: 720px;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #555;
+            font-size: 24px;
+            position: relative;
+            overflow: hidden;
+            flex-shrink: 0;
+        }
+
+        .video-area img {
+            /* Fill entire video area, maintain aspect ratio */
+            width: 960px;
+            height: 720px;
+            object-fit: contain;
+        }
+
+        .video-error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff4444;
+            text-align: center;
+        }
+
+        /* Tile styling - FIXED HEIGHT: 240px each (720/3) */
+        .tile {
+            height: 240px;
+            min-height: 240px;
+            max-height: 240px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            flex-shrink: 0;
+            position: relative;
+            border: 1px solid transparent;
+            transition: border-color 0.15s ease;
+        }
+
+        /* Show tile boundaries on hover */
+        .overlay-bar:hover .tile {
+            border: 1px dashed #00ff00;
+        }
+
+        .overlay-bar:hover .tile::after {
+            content: attr(data-tile);
+            position: absolute;
+            top: 2px;
+            right: 4px;
+            font-size: 10px;
+            color: #00ff00;
+            opacity: 0.7;
+        }
+
+        .tile-single {
+            font-size: 28px;
+            font-weight: bold;
+            padding-top: 10px;
+        }
+
+        /* Left bar tiles - no padding, let detection-list handle spacing */
+        .overlay-bar.left .tile {
+            padding: 0 10px;
+        }
+
+        /* Detection list - calculated to fill 240px tile exactly
+           6px top + (48px × 4) + (12px × 3) + 6px bottom = 240px */
+        .detection-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 6px 0;
+        }
+
+        .detection-row {
+            position: relative;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            background: #111;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .detection-meter {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            background: linear-gradient(90deg, #228822 0%, #44aa44 100%);
+            opacity: 0.7;
+            transition: width 0.3s ease;
+        }
+
+        .detection-label {
+            position: relative;
+            z-index: 1;
+            font-size: 22px;
+            font-weight: bold;
+            color: #ffffff;
+            padding: 0 10px;
+            text-shadow: 1px 1px 2px #000;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            width: 100%;
+        }
+
+        /* Control panel */
+        .controls {
+            background: #2a2a4e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .controls h2 {
+            margin-bottom: 15px;
+            color: #00d4ff;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+        }
+
+        .control-group input, .control-group textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #1a1a2e;
+            color: #fff;
+            font-family: monospace;
+        }
+
+        .control-group textarea {
+            height: 120px;
+            resize: vertical;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+
+        .btn-primary {
+            background: #00d4ff;
+            color: #000;
+        }
+
+        .btn-secondary {
+            background: #444;
+            color: #fff;
+        }
+
+        .btn:hover {
+            opacity: 0.8;
+        }
+
+        .color-swatch {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-right: 15px;
+            padding: 4px 8px;
+            background: #1a1a2e;
+            border-radius: 4px;
+        }
+
+        .swatch-box {
+            width: 20px;
+            height: 20px;
+            border-radius: 2px;
+        }
+
+        .info-panel {
+            background: #2a2a4e;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .info-panel h3 {
+            margin-bottom: 10px;
+            color: #00d4ff;
+        }
+
+        .info-panel pre {
+            background: #1a1a2e;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .scale-info {
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        /* API Monitor */
+        .api-monitor {
+            display: flex;
+            flex-direction: column;
+            height: 300px;
+        }
+
+        .api-stats {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 10px;
+            align-items: center;
+        }
+
+        .api-stats .stat {
+            font-size: 13px;
+            color: #aaa;
+        }
+
+        .api-stats .stat strong {
+            color: #00d4ff;
+        }
+
+        .btn-small {
+            padding: 4px 10px;
+            font-size: 12px;
+            margin-left: auto;
+        }
+
+        .api-log {
+            flex: 1;
+            background: #0d0d1a;
+            border-radius: 4px;
+            padding: 10px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1a2e;
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .log-time {
+            color: #666;
+            margin-right: 8px;
+        }
+
+        .log-type {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            margin-right: 8px;
+        }
+
+        .log-type.data {
+            background: #00aa44;
+            color: #fff;
+        }
+
+        .log-type.keepalive {
+            background: #555;
+            color: #aaa;
+        }
+
+        .log-type.error {
+            background: #cc3333;
+            color: #fff;
+        }
+
+        .log-type.connect {
+            background: #0088cc;
+            color: #fff;
+        }
+
+        .log-content {
+            color: #ccc;
+            word-break: break-all;
+        }
+
+        .log-content .label {
+            color: #ffff00;
+        }
+
+        .log-content .confidence {
+            color: #00ff88;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Detection Overlay UI Simulator</h1>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-dot" id="detectionDot"></div>
+                <span id="detectionStatus">Detection: Connecting...</span>
+            </div>
+            <div class="status-item">
+                <div class="status-dot" id="connectionDot"></div>
+                <span id="connectionStatus">Connections: Connecting...</span>
+            </div>
+            <div class="status-item">
+                <span>Detections: <strong id="detectionCount">0</strong></span>
+            </div>
+            <div class="status-item">
+                <span>Connections: <strong id="connCount">0</strong></span>
+            </div>
+        </div>
+
+        <div class="display-wrapper">
+            <div class="display-scaler" id="displayScaler">
+                <div class="display">
+                    <!-- Left bar (USB side, bottom bar in framebuffer) -->
+                    <div class="overlay-bar left" id="leftBar">
+                    <div class="tile" id="leftTile0" data-tile="Tile 0"></div>
+                    <div class="tile" id="leftTile1" data-tile="Tile 1"></div>
+                    <div class="tile" id="leftTile2" data-tile="Tile 2"></div>
+                </div>
+
+                <!-- Video area -->
+                <div class="video-area" id="videoArea">
+                    <img id="mjpegStream" src="/api/mjpeg" alt="MJPEG Stream"
+                         onerror="this.style.display='none'; document.getElementById('videoError').style.display='block';">
+                    <div class="video-error" id="videoError" style="display: none;">
+                        <div>MJPEG Stream Unavailable</div>
+                        <div style="font-size: 14px; margin-top: 10px;">Check camera connection</div>
+                    </div>
+                </div>
+
+                <!-- Right bar (Camera side, top bar in framebuffer) -->
+                <div class="overlay-bar right" id="rightBar">
+                    <div class="tile" id="rightTile0" data-tile="Tile 0">
+                        <div class="tile-single" style="color: #00ffff;" id="connDisplay">Conn: 0</div>
+                    </div>
+                    <div class="tile" id="rightTile1" data-tile="Tile 1">
+                        <!-- Empty -->
+                    </div>
+                    <div class="tile" id="rightTile2" data-tile="Tile 2">
+                        <!-- Empty -->
+                    </div>
+                </div>
+            </div>
+            </div>
+            <div class="scale-info" id="scaleInfo">Scale: 100%</div>
+        </div>
+
+        <div class="grid-2">
+            <div class="controls">
+                <h2>Mock Detections</h2>
+                <div class="control-group">
+                    <label>Test JSON (Detection API format):</label>
+                    <textarea id="mockJson">{
+  "detections": [
+    {"class_name": "person", "confidence": 0.95},
+    {"class_name": "car", "confidence": 0.87},
+    {"class_name": "dog", "confidence": 0.72},
+    {"class_name": "cat", "confidence": 0.65},
+    {"class_name": "bird", "confidence": 0.58},
+    {"class_name": "bicycle", "confidence": 0.52},
+    {"class_name": "truck", "confidence": 0.48},
+    {"class_name": "bus", "confidence": 0.41}
+  ]
+}</textarea>
+                </div>
+                <button class="btn btn-primary" onclick="sendMock()">Send Mock Data</button>
+                <button class="btn btn-secondary" onclick="clearDetections()">Clear</button>
+
+                <h2 style="margin-top: 20px;">Mock Connections</h2>
+                <div class="control-group">
+                    <label>WebRTC connections:</label>
+                    <input type="number" id="mockWebrtc" value="0" min="0" max="10" style="width: 80px;">
+                </div>
+                <div class="control-group">
+                    <label>MJPEG connections:</label>
+                    <input type="number" id="mockMjpeg" value="0" min="0" max="10" style="width: 80px;">
+                </div>
+                <button class="btn btn-primary" onclick="sendMockConnections()">Set Connections</button>
+            </div>
+
+            <div class="info-panel api-monitor">
+                <h3>Detection API Monitor</h3>
+                <div class="api-stats">
+                    <span class="stat">Events: <strong id="eventCount">0</strong></span>
+                    <span class="stat">Keepalives: <strong id="keepaliveCount">0</strong></span>
+                    <span class="stat">Errors: <strong id="errorCount">0</strong></span>
+                    <button class="btn btn-secondary btn-small" onclick="clearLog()">Clear</button>
+                </div>
+                <div class="api-log" id="apiLog"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+
+        function updateDisplay(data) {
+            // Update detection status
+            const dot = document.getElementById('detectionDot');
+            const status = document.getElementById('detectionStatus');
+            if (data.connected) {
+                dot.className = 'status-dot connected';
+                status.textContent = 'Detection: Connected';
+            } else {
+                dot.className = 'status-dot disconnected';
+                status.textContent = 'Detection: ' + (data.error || 'Disconnected');
+            }
+
+            // Update detection count
+            document.getElementById('detectionCount').textContent = data.count;
+
+            // Update left bar - 4 detections per tile, max 12 total
+            const detections = data.detections || [];
+
+            for (let tileIdx = 0; tileIdx < 3; tileIdx++) {
+                const tile = document.getElementById(`leftTile${tileIdx}`);
+                const start = tileIdx * 4;
+                const tileDetections = detections.slice(start, start + 4);
+
+                if (tileDetections.length > 0) {
+                    const rows = tileDetections.map(det => {
+                        const pct = Math.round(det.confidence * 100);
+                        return `
+                            <div class="detection-row">
+                                <div class="detection-meter" style="width: ${pct}%;"></div>
+                                <span class="detection-label">${det.label}</span>
+                            </div>
+                        `;
+                    }).join('');
+                    tile.innerHTML = `<div class="detection-list">${rows}</div>`;
+                } else {
+                    tile.innerHTML = '';
+                }
+            }
+        }
+
+        function updateConnections(data) {
+            // Update connection status
+            const dot = document.getElementById('connectionDot');
+            const status = document.getElementById('connectionStatus');
+            if (data.connected) {
+                dot.className = 'status-dot connected';
+                status.textContent = 'Connections: Connected';
+            } else {
+                dot.className = 'status-dot disconnected';
+                status.textContent = 'Connections: Disconnected';
+            }
+
+            // Update connection count
+            const total = data.total || 0;
+            document.getElementById('connCount').textContent = total;
+            document.getElementById('connDisplay').textContent = `Conn: ${total}`;
+        }
+
+        function connectSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/api/stream');
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateDisplay(data);
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+
+            eventSource.onerror = function() {
+                console.log('SSE connection error, reconnecting...');
+                setTimeout(connectSSE, 3000);
+            };
+        }
+
+        // Connection SSE
+        let connSource = null;
+
+        function connectConnectionsSSE() {
+            if (connSource) {
+                connSource.close();
+            }
+
+            connSource = new EventSource('/api/connections/stream');
+
+            connSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateConnections(data);
+                } catch (e) {
+                    console.error('Connections parse error:', e);
+                }
+            };
+
+            connSource.onerror = function() {
+                console.log('Connections SSE error, reconnecting...');
+                setTimeout(connectConnectionsSSE, 3000);
+            };
+        }
+
+        function sendMock() {
+            try {
+                const json = JSON.parse(document.getElementById('mockJson').value);
+                fetch('/api/mock', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(json)
+                });
+            } catch (e) {
+                alert('Invalid JSON: ' + e.message);
+            }
+        }
+
+        function clearDetections() {
+            fetch('/api/mock', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ detections: [] })
+            });
+        }
+
+        function sendMockConnections() {
+            const webrtc = parseInt(document.getElementById('mockWebrtc').value) || 0;
+            const mjpeg = parseInt(document.getElementById('mockMjpeg').value) || 0;
+            fetch('/api/connections/mock', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ webrtc, mjpeg })
+            });
+        }
+
+        // API Log
+        let logSource = null;
+        let eventCount = 0;
+        let keepaliveCount = 0;
+        let errorCount = 0;
+        const maxLogEntries = 100;
+
+        function addLogEntry(entry) {
+            const log = document.getElementById('apiLog');
+
+            // Update counters
+            if (entry.type === 'data') {
+                eventCount++;
+                document.getElementById('eventCount').textContent = eventCount;
+            } else if (entry.type === 'keepalive') {
+                keepaliveCount++;
+                document.getElementById('keepaliveCount').textContent = keepaliveCount;
+            } else if (entry.type === 'error') {
+                errorCount++;
+                document.getElementById('errorCount').textContent = errorCount;
+            }
+
+            // Create log entry element
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerHTML = `
+                <span class="log-time">${entry.time}</span>
+                <span class="log-type ${entry.type}">${entry.type.toUpperCase()}</span>
+                <span class="log-content">${escapeHtml(entry.content)}</span>
+            `;
+
+            // Add at top
+            log.insertBefore(div, log.firstChild);
+
+            // Limit entries
+            while (log.children.length > maxLogEntries) {
+                log.removeChild(log.lastChild);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function clearLog() {
+            document.getElementById('apiLog').innerHTML = '';
+            eventCount = 0;
+            keepaliveCount = 0;
+            errorCount = 0;
+            document.getElementById('eventCount').textContent = '0';
+            document.getElementById('keepaliveCount').textContent = '0';
+            document.getElementById('errorCount').textContent = '0';
+        }
+
+        function connectLogStream() {
+            if (logSource) {
+                logSource.close();
+            }
+
+            logSource = new EventSource('/api/log_stream');
+
+            logSource.onmessage = function(event) {
+                try {
+                    const entry = JSON.parse(event.data);
+                    addLogEntry(entry);
+                } catch (e) {
+                    console.error('Log parse error:', e);
+                }
+            };
+
+            logSource.onerror = function() {
+                console.log('Log stream error, reconnecting...');
+                setTimeout(connectLogStream, 3000);
+            };
+        }
+
+        // Responsive scaling - maintain fixed aspect ratio
+        function updateScale() {
+            const scaler = document.getElementById('displayScaler');
+            const wrapper = document.querySelector('.display-wrapper');
+            const info = document.getElementById('scaleInfo');
+
+            // Native display size (with border)
+            const nativeWidth = 1288;
+            const nativeHeight = 728;
+
+            // Available space (with some padding)
+            const availableWidth = wrapper.clientWidth - 40;
+            const maxHeight = window.innerHeight * 0.6;
+
+            // Calculate scale to fit
+            const scaleX = availableWidth / nativeWidth;
+            const scaleY = maxHeight / nativeHeight;
+            const scale = Math.min(scaleX, scaleY, 1.0); // Max 100%
+
+            scaler.style.transform = `scale(${scale})`;
+            info.textContent = `Scale: ${Math.round(scale * 100)}% (Native: 1280×720)`;
+
+            // Adjust wrapper height to match scaled content
+            wrapper.style.height = `${nativeHeight * scale + 30}px`;
+        }
+
+        // Update on resize
+        window.addEventListener('resize', updateScale);
+        updateScale();
+
+        // Start SSE connections
+        connectSSE();
+        connectLogStream();
+        connectConnectionsSSE();
+    </script>
+</body>
+</html>

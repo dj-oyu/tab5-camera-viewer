@@ -1,8 +1,10 @@
 #include "RenderTask.h"
+#include "OverlayRenderer.h"
 #include "PipelineConfig.h"
 #include "PipelineContext.h"
 #include <PPAPipeline.h>
 #include <Arduino.h>
+#include <esp_cache.h>
 
 namespace {
 struct ScalePlan {
@@ -33,6 +35,13 @@ ScalePlan computeScalePlan() {
 void renderTask(void *pvParameters) {
   auto *ctx = static_cast<PipelineContext *>(pvParameters);
 
+  Serial.println("RenderTask: Starting...");
+
+  // Initialize overlay renderer with framebuffer address
+  OverlayRenderer::init(ctx->framebuffer());
+
+  Serial.println("RenderTask: Initialized");
+
   uint32_t frame_count = 0;
   uint32_t last_fps_time = millis();
   DecodedFrameData dfd;
@@ -55,16 +64,22 @@ void renderTask(void *pvParameters) {
           scale = 0.125f;
         }
 
+        // Output to video area only (skip top overlay bar)
+        uint16_t *videoBuffer = ctx->framebuffer() + VIDEO_Y_OFFSET * PANEL_WIDTH;
+
         bool ppa_ok = PPAPipeline::transform(
             reinterpret_cast<const uint8_t *>(
                 ctx->decodeBuffer(dfd.buf_idx)),
-            reinterpret_cast<uint8_t *>(ctx->framebuffer()), STREAM_WIDTH,
-            STREAM_HEIGHT, PANEL_WIDTH, PANEL_HEIGHT,
+            reinterpret_cast<uint8_t *>(videoBuffer), STREAM_WIDTH,
+            STREAM_HEIGHT, PANEL_WIDTH, VIDEO_HEIGHT,
             PPA_SRM_COLOR_MODE_RGB565, PPA_SRM_COLOR_MODE_RGB565, plan.rotation,
             scale, scale, ctx->ppaDoneSema());
 
         if (ppa_ok) {
           if (xSemaphoreTake(ctx->ppaDoneSema(), pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Render overlays (handles its own cache sync)
+            OverlayRenderer::render(ctx->detectionData(), ctx->connectionData());
+
             esp_lcd_panel_draw_bitmap(ctx->panelHandle(), 0, 0, PANEL_WIDTH,
                                       PANEL_HEIGHT, ctx->framebuffer());
           } else {
