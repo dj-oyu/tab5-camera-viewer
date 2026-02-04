@@ -40,6 +40,8 @@ constexpr uint16_t BG_COLOR = 0x0841;        // Dark gray (#111111)
 constexpr uint16_t METER_COLOR = 0x2444;     // Dark green (#228822)
 constexpr uint16_t TEXT_COLOR = TFT_WHITE;
 constexpr uint16_t CONN_COLOR = TFT_CYAN;
+constexpr uint16_t ERROR_COLOR = TFT_RED;
+constexpr uint16_t CONNECTING_COLOR = TFT_ORANGE;
 
 // Detection display timeout (clear display if no data for this long)
 constexpr uint32_t DETECTION_DISPLAY_TIMEOUT_MS = 3000;
@@ -50,6 +52,8 @@ uint32_t lastDetectionTime = 0;
 int cachedConnectionTotal = 0;
 int cachedConnectionWebrtc = 0;
 int cachedConnectionMjpeg = 0;
+ConnectionState cachedConnectionState = ConnectionState::Connecting;
+int cachedConnectionHttpCode = 0;
 
 // Calculate Y position for a row within a tile
 int getRowY(int rowIndex) {
@@ -86,10 +90,38 @@ void renderDetectionTile(int tileIndex, Detection *detections, int totalCount) {
 // Render connection count tile (Right bar, Tile 0 only)
 void renderConnectionTile() {
   tileSprite.fillSprite(BG_COLOR);
-  tileSprite.setTextColor(CONN_COLOR);
 
-  // Display connection counts
   int y = TILE_PADDING;
+
+  // Handle error and connecting states
+  if (cachedConnectionState == ConnectionState::Error) {
+    tileSprite.setTextColor(ERROR_COLOR);
+    tileSprite.setCursor(4, y);
+    tileSprite.print("CONN ERR");
+
+    y += ROW_HEIGHT + ROW_GAP;
+    tileSprite.setCursor(4, y);
+    if (cachedConnectionHttpCode == -1) {
+      tileSprite.print("WiFi NG");
+    } else if (cachedConnectionHttpCode == -2) {
+      tileSprite.print("No URL");
+    } else if (cachedConnectionHttpCode == 0) {
+      tileSprite.print("Disconn");
+    } else {
+      tileSprite.printf("HTTP %d", cachedConnectionHttpCode);
+    }
+    return;
+  }
+
+  if (cachedConnectionState == ConnectionState::Connecting) {
+    tileSprite.setTextColor(CONNECTING_COLOR);
+    tileSprite.setCursor(4, y);
+    tileSprite.print("Conn...");
+    return;
+  }
+
+  // Connected state - display connection counts
+  tileSprite.setTextColor(CONN_COLOR);
   tileSprite.setCursor(4, y);
   tileSprite.printf("Conn:%d", cachedConnectionTotal);
 
@@ -188,7 +220,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     lastDetectionTime = millis();
   }
 
-  // Read connection data
+  // Read connection data and state
   int connTotal = 0, connWebrtc = 0, connMjpeg = 0;
   bool connDataReceived = connectionData.tryRead(&connTotal, &connWebrtc, &connMjpeg);
   if (connDataReceived) {
@@ -196,6 +228,12 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     cachedConnectionWebrtc = connWebrtc;
     cachedConnectionMjpeg = connMjpeg;
   }
+
+  // Always read connection state (independent of data updates)
+  int httpCode = 0;
+  ConnectionState connState = connectionData.getState(&httpCode);
+  cachedConnectionState = connState;
+  cachedConnectionHttpCode = httpCode;
 
   // Check for detection timeout - clear display if no data received
   uint32_t now = millis();
@@ -212,10 +250,14 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   static int prevConnTotal = -1;
   static int prevConnWebrtc = -1;
   static int prevConnMjpeg = -1;
+  static ConnectionState prevConnState = ConnectionState::Connecting;
+  static int prevConnHttpCode = 0;
 
   bool connChanged = (cachedConnectionTotal != prevConnTotal ||
                       cachedConnectionWebrtc != prevConnWebrtc ||
-                      cachedConnectionMjpeg != prevConnMjpeg);
+                      cachedConnectionMjpeg != prevConnMjpeg ||
+                      cachedConnectionState != prevConnState ||
+                      cachedConnectionHttpCode != prevConnHttpCode);
 
   if (!rightBarInitialized || connChanged) {
     renderConnectionTile();
@@ -233,8 +275,16 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     prevConnTotal = cachedConnectionTotal;
     prevConnWebrtc = cachedConnectionWebrtc;
     prevConnMjpeg = cachedConnectionMjpeg;
-    Serial.printf("OverlayRenderer: Connection updated: %d/%d/%d\n",
-                  cachedConnectionTotal, cachedConnectionWebrtc, cachedConnectionMjpeg);
+    prevConnState = cachedConnectionState;
+    prevConnHttpCode = cachedConnectionHttpCode;
+    if (cachedConnectionState == ConnectionState::Error) {
+      Serial.printf("OverlayRenderer: Connection error: httpCode=%d\n", cachedConnectionHttpCode);
+    } else if (cachedConnectionState == ConnectionState::Connecting) {
+      Serial.println("OverlayRenderer: Connection connecting...");
+    } else {
+      Serial.printf("OverlayRenderer: Connection updated: %d/%d/%d\n",
+                    cachedConnectionTotal, cachedConnectionWebrtc, cachedConnectionMjpeg);
+    }
   }
 
   // === LEFT BAR (USB side, bottom in framebuffer) - Detection List ===

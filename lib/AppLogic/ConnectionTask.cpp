@@ -51,10 +51,12 @@ void connectionTask(void *pvParameters) {
   while (1) {
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("ConnectionTask: WiFi disconnected, waiting...");
+      data.setState(ConnectionState::Error, -1);  // -1 indicates WiFi error
       vTaskDelay(pdMS_TO_TICKS(DETECTION_RECONNECT_DELAY_MS));
       continue;
     }
 
+    data.setState(ConnectionState::Connecting);
     Serial.println("ConnectionTask: begin()...");
     http.begin(secureClient, CONNECTIONS_URL);
     http.setTimeout(DETECTION_TIMEOUT_MS);
@@ -67,11 +69,13 @@ void connectionTask(void *pvParameters) {
                   millis() - startTime, httpCode);
     if (httpCode != 200) {
       Serial.printf("Connection HTTP failed: %d\n", httpCode);
+      data.setState(ConnectionState::Error, httpCode);
       http.end();
       vTaskDelay(pdMS_TO_TICKS(DETECTION_RECONNECT_DELAY_MS));
       continue;
     }
 
+    data.setState(ConnectionState::Connected);
     Serial.println("Connection stream connected");
     WiFiClient *client = http.getStreamPtr();
     client->setTimeout(1);  // Non-blocking read with short timeout
@@ -104,11 +108,13 @@ void connectionTask(void *pvParameters) {
     }
 
     Serial.println("Connection stream disconnected");
+    data.setState(ConnectionState::Error, 0);  // 0 indicates stream disconnected
     http.end();
     vTaskDelay(pdMS_TO_TICKS(DETECTION_RECONNECT_DELAY_MS));
   }
 #else
   Serial.println("ConnectionTask: CONNECTIONS_URL not defined, task idle");
+  data.setState(ConnectionState::Error, -2);  // -2 indicates URL not configured
   while (1) {
     vTaskDelay(pdMS_TO_TICKS(10000));
   }
