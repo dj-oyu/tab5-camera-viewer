@@ -6,7 +6,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 
 namespace {
 
@@ -39,9 +39,7 @@ void connectionTask(void *pvParameters) {
   Serial.println("ConnectionTask: WiFi ready");
 
 #ifdef CONNECTIONS_URL
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure(); // Skip certificate verification
-
+  WiFiClient httpClient;
   HTTPClient http;
   String line;
   line.reserve(256);
@@ -58,7 +56,7 @@ void connectionTask(void *pvParameters) {
 
     data.setState(ConnectionState::Connecting);
     Serial.println("ConnectionTask: begin()...");
-    http.begin(secureClient, CONNECTIONS_URL);
+    http.begin(httpClient, CONNECTIONS_URL);
     http.setTimeout(DETECTION_TIMEOUT_MS);
     http.setReuse(false);  // Don't reuse connection for SSE
 

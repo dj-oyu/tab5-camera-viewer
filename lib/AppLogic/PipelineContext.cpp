@@ -58,6 +58,11 @@ bool PipelineContext::init() {
     return false;
   }
 
+  if (!recording_data_.init()) {
+    Serial.println("Failed to init RecordingData");
+    return false;
+  }
+
   return true;
 }
 

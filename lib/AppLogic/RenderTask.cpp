@@ -78,7 +78,8 @@ void renderTask(void *pvParameters) {
         if (ppa_ok) {
           if (xSemaphoreTake(ctx->ppaDoneSema(), pdMS_TO_TICKS(100)) == pdTRUE) {
             // Render overlays (handles its own cache sync)
-            OverlayRenderer::render(ctx->detectionData(), ctx->connectionData());
+            OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
+                                    ctx->recordingData());
 
             esp_lcd_panel_draw_bitmap(ctx->panelHandle(), 0, 0, PANEL_WIDTH,
                                       PANEL_HEIGHT, ctx->framebuffer());

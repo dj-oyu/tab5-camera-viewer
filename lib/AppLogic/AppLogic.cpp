@@ -6,10 +6,38 @@
 #include "FetchTask.h"
 #include "PipelineConfig.h"
 #include "PipelineContext.h"
+#include "RecordingData.h"
+#include "RecordingTask.h"
 #include "RenderTask.h"
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <PPAPipeline.h>
+
+namespace {
+PipelineContext *g_ctx = nullptr;
+
+// REC button touch area (framebuffer coordinates - portrait 720x1280)
+// Calculated from OverlayRenderer:
+//   - Tile 2 starts at X = 2 * 240 = 480
+//   - Button in tile: BTN_X=15, BTN_Y=20, BTN_W=130, BTN_H=80
+//   - With rotation 3: fb_x = tileOffset + tile_y, fb_y = tile_x
+//   - Button fb_x: 480 + 20 = 500 to 480 + 100 = 580
+//   - Button fb_y: 15 to 145
+constexpr int REC_BUTTON_X_CENTER = 540;  // (500 + 580) / 2
+constexpr int REC_BUTTON_Y_CENTER = 80;   // (15 + 145) / 2
+constexpr int REC_BUTTON_HALF_W = 50;     // Half width (80/2 + margin)
+constexpr int REC_BUTTON_HALF_H = 80;     // Half height (130/2 + margin)
+constexpr int TOUCH_MARGIN = 30;          // Extra margin for easier touch
+
+bool isInRecButton(int x, int y) {
+  int dx = x - REC_BUTTON_X_CENTER;
+  int dy = y - REC_BUTTON_Y_CENTER;
+  return (dx >= -(REC_BUTTON_HALF_W + TOUCH_MARGIN) &&
+          dx <= (REC_BUTTON_HALF_W + TOUCH_MARGIN) &&
+          dy >= -(REC_BUTTON_HALF_H + TOUCH_MARGIN) &&
+          dy <= (REC_BUTTON_HALF_H + TOUCH_MARGIN));
+}
+} // namespace
 
 void AppLogic::begin() {
   auto cfg = M5.config();
@@ -24,6 +52,7 @@ void AppLogic::begin() {
   }
 
   static PipelineContext ctx;
+  g_ctx = &ctx;
   if (!ctx.init()) {
     Serial.println("PipelineContext init failed");
     return;
@@ -43,6 +72,17 @@ void AppLogic::begin() {
   RenderTask::start(ctx, 5, 1);      // Core 1 - Display output
   DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
   ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
+  RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
 }
 
-void AppLogic::update() { M5.update(); }
+void AppLogic::update() {
+  M5.update();
+
+  // Handle touch input for REC button
+  if (g_ctx != nullptr) {
+    auto touch = M5.Touch.getDetail();
+    if (touch.wasPressed() && isInRecButton(touch.x, touch.y)) {
+      g_ctx->recordingData().requestToggle();
+    }
+  }
+}
