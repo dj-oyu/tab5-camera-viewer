@@ -2,6 +2,7 @@
 #include "ConnectionData.h"
 #include "DetectionData.h"
 #include "PipelineConfig.h"
+#include "RecordingData.h"
 #include <Arduino.h>
 #include <M5GFX.h>
 #include <cstring>
@@ -42,6 +43,8 @@ constexpr uint16_t TEXT_COLOR = TFT_WHITE;
 constexpr uint16_t CONN_COLOR = TFT_CYAN;
 constexpr uint16_t ERROR_COLOR = TFT_RED;
 constexpr uint16_t CONNECTING_COLOR = TFT_ORANGE;
+constexpr uint16_t REC_COLOR = 0xF800;       // Bright red for REC indicator
+constexpr uint16_t REC_IDLE_COLOR = 0x4208;  // Dark gray for idle REC
 
 // Detection display timeout (clear display if no data for this long)
 constexpr uint32_t DETECTION_DISPLAY_TIMEOUT_MS = 3000;
@@ -54,6 +57,12 @@ int cachedConnectionWebrtc = 0;
 int cachedConnectionMjpeg = 0;
 ConnectionState cachedConnectionState = ConnectionState::Connecting;
 int cachedConnectionHttpCode = 0;
+
+// Recording state cache
+RecordingState cachedRecordingState = RecordingState::Idle;
+float cachedRecordingDuration = 0.0f;
+uint32_t lastRecordingBlinkTime = 0;
+bool recordingBlinkOn = true;
 
 // Calculate Y position for a row within a tile
 int getRowY(int rowIndex) {
@@ -136,6 +145,104 @@ void renderConnectionTile() {
   tileSprite.printf("MJP:%d", cachedConnectionMjpeg);
 }
 
+// Render recording tile (Right bar, Tile 2) - Button design
+void renderRecordingTile() {
+  tileSprite.fillSprite(BG_COLOR);
+
+  bool isRecording = (cachedRecordingState == RecordingState::Recording);
+  bool isPending = (cachedRecordingState == RecordingState::Pending);
+
+  // Button area: centered, 130x80 pixels
+  constexpr int BTN_W = 130;
+  constexpr int BTN_H = 80;
+  constexpr int BTN_X = (TILE_WIDTH - BTN_W) / 2;  // Center horizontally
+  constexpr int BTN_Y = 20;                         // Top padding
+  constexpr int BTN_RADIUS = 12;
+
+  if (isPending) {
+    // Pending state: grayed button with "..." - immediate feedback
+    tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x4208);  // Dark gray
+    tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, TFT_DARKGREY);
+
+    // Animated dots based on blink state
+    tileSprite.setTextSize(3);
+    tileSprite.setTextColor(TFT_YELLOW);
+    tileSprite.setCursor(BTN_X + 45, BTN_Y + (BTN_H - 24) / 2);
+    tileSprite.print(recordingBlinkOn ? "..." : " . ");
+  } else if (isRecording) {
+    // Recording state: STOP button with red border
+    // Button background
+    tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x4208);  // Dark gray fill
+    // Blinking red border
+    if (recordingBlinkOn) {
+      tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_COLOR);
+      tileSprite.drawRoundRect(BTN_X + 1, BTN_Y + 1, BTN_W - 2, BTN_H - 2, BTN_RADIUS - 1, REC_COLOR);
+    } else {
+      tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x8000);  // Dim red
+    }
+
+    // Blinking red circle indicator
+    int dotX = BTN_X + 25;
+    int dotY = BTN_Y + BTN_H / 2;
+    if (recordingBlinkOn) {
+      tileSprite.fillCircle(dotX, dotY, 10, REC_COLOR);
+    } else {
+      tileSprite.drawCircle(dotX, dotY, 10, REC_COLOR);
+    }
+
+    // "STOP" text (large font)
+    tileSprite.setTextSize(3);
+    tileSprite.setTextColor(TEXT_COLOR);
+    tileSprite.setCursor(BTN_X + 45, BTN_Y + (BTN_H - 24) / 2);
+    tileSprite.print("STOP");
+  } else {
+    // Idle state: REC button
+    // Red button background
+    tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0xC000);  // Dark red
+    tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_COLOR);
+
+    // Red circle indicator
+    int dotX = BTN_X + 25;
+    int dotY = BTN_Y + BTN_H / 2;
+    tileSprite.fillCircle(dotX, dotY, 10, REC_COLOR);
+
+    // "REC" text (large font)
+    tileSprite.setTextSize(3);
+    tileSprite.setTextColor(TEXT_COLOR);
+    tileSprite.setCursor(BTN_X + 50, BTN_Y + (BTN_H - 24) / 2);
+    tileSprite.print("REC");
+  }
+
+  // Duration display below button (large font)
+  tileSprite.setTextSize(3);
+  int durationY = BTN_Y + BTN_H + 15;
+
+  if (isRecording || cachedRecordingDuration > 0) {
+    int totalSeconds = (int)cachedRecordingDuration;
+    int minutes = totalSeconds / 60;
+    int seconds = totalSeconds % 60;
+
+    tileSprite.setTextColor(isRecording ? TFT_GREEN : TEXT_COLOR);
+    tileSprite.setCursor(BTN_X + 20, durationY);
+    tileSprite.printf("%02d:%02d", minutes, seconds);
+  } else {
+    tileSprite.setTextColor(REC_IDLE_COLOR);
+    tileSprite.setCursor(BTN_X + 20, durationY);
+    tileSprite.print("--:--");
+  }
+
+  // Error display
+  if (cachedRecordingState == RecordingState::Error) {
+    tileSprite.setTextSize(2);
+    tileSprite.setTextColor(ERROR_COLOR);
+    tileSprite.setCursor(BTN_X + 30, durationY + 35);
+    tileSprite.print("ERROR");
+  }
+
+  // Reset text size for other tiles
+  tileSprite.setTextSize(2);
+}
+
 // Copy tile sprite to framebuffer bar
 // The sprite is drawn with text in normal orientation (rotation 3)
 // but stored in buffer as 160(W) x 240(H)
@@ -200,7 +307,8 @@ void OverlayRenderer::init(uint16_t *framebuffer) {
                 topBar, bottomBar);
 }
 
-void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &connectionData) {
+void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &connectionData,
+                             RecordingData &recordingData) {
   if (!initialized)
     return;
 
@@ -244,6 +352,25 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     }
   }
 
+  // Read recording data
+  RecordingState recState = recordingData.getState();
+  float recDuration = recordingData.getDuration();
+  cachedRecordingState = recState;
+  cachedRecordingDuration = recDuration;
+
+  // Update blink state for recording/pending indicator (faster blink for pending)
+  bool needsBlink = (recState == RecordingState::Recording || recState == RecordingState::Pending);
+  uint32_t blinkInterval = (recState == RecordingState::Pending) ? 250 : 500;  // Faster blink for pending
+  if (needsBlink) {
+    if (now - lastRecordingBlinkTime >= blinkInterval) {
+      recordingBlinkOn = !recordingBlinkOn;
+      lastRecordingBlinkTime = now;
+    }
+  } else {
+    recordingBlinkOn = true;
+    lastRecordingBlinkTime = now;
+  }
+
   // === RIGHT BAR (Camera side, top in framebuffer) - Connection Count ===
   // Process this FIRST, independent of detection updates
   static bool rightBarInitialized = false;
@@ -259,31 +386,54 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
                       cachedConnectionState != prevConnState ||
                       cachedConnectionHttpCode != prevConnHttpCode);
 
+  // Track recording state changes
+  static RecordingState prevRecState = RecordingState::Idle;
+  static float prevRecDuration = 0.0f;
+  static bool prevBlinkState = true;
+
+  bool recChanged = (recState != prevRecState ||
+                     (int)recDuration != (int)prevRecDuration ||
+                     ((recState == RecordingState::Recording || recState == RecordingState::Pending) &&
+                      recordingBlinkOn != prevBlinkState));
+
   if (!rightBarInitialized || connChanged) {
     renderConnectionTile();
     copyTileToBar(topBar, 0);
 
-    // Clear tiles 1 and 2 (only once)
+    // Clear tile 1 (only once)
     if (!rightBarInitialized) {
       tileSprite.fillSprite(BG_COLOR);
       copyTileToBar(topBar, 1);
-      copyTileToBar(topBar, 2);
     }
+  }
 
+  // Render recording tile (Tile 2) when state changes or blink toggles
+  if (!rightBarInitialized || recChanged) {
+    renderRecordingTile();
+    copyTileToBar(topBar, 2);
+    prevRecState = recState;
+    prevRecDuration = recDuration;
+    prevBlinkState = recordingBlinkOn;
+  }
+
+  if (!rightBarInitialized || connChanged || recChanged) {
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     rightBarInitialized = true;
-    prevConnTotal = cachedConnectionTotal;
-    prevConnWebrtc = cachedConnectionWebrtc;
-    prevConnMjpeg = cachedConnectionMjpeg;
-    prevConnState = cachedConnectionState;
-    prevConnHttpCode = cachedConnectionHttpCode;
-    if (cachedConnectionState == ConnectionState::Error) {
-      Serial.printf("OverlayRenderer: Connection error: httpCode=%d\n", cachedConnectionHttpCode);
-    } else if (cachedConnectionState == ConnectionState::Connecting) {
-      Serial.println("OverlayRenderer: Connection connecting...");
-    } else {
-      Serial.printf("OverlayRenderer: Connection updated: %d/%d/%d\n",
-                    cachedConnectionTotal, cachedConnectionWebrtc, cachedConnectionMjpeg);
+
+    if (connChanged) {
+      prevConnTotal = cachedConnectionTotal;
+      prevConnWebrtc = cachedConnectionWebrtc;
+      prevConnMjpeg = cachedConnectionMjpeg;
+      prevConnState = cachedConnectionState;
+      prevConnHttpCode = cachedConnectionHttpCode;
+      if (cachedConnectionState == ConnectionState::Error) {
+        Serial.printf("OverlayRenderer: Connection error: httpCode=%d\n", cachedConnectionHttpCode);
+      } else if (cachedConnectionState == ConnectionState::Connecting) {
+        Serial.println("OverlayRenderer: Connection connecting...");
+      } else {
+        Serial.printf("OverlayRenderer: Connection updated: %d/%d/%d\n",
+                      cachedConnectionTotal, cachedConnectionWebrtc, cachedConnectionMjpeg);
+      }
     }
   }
 

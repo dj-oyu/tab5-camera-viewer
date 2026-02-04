@@ -2,6 +2,7 @@
 
 #include "ConnectionData.h"
 #include "DetectionData.h"
+#include "RecordingData.h"
 #include "PipelineConfig.h"
 #include <cstdint>
 #include <driver/jpeg_decode.h>
@@ -50,6 +51,7 @@ public:
 
   DetectionData &detectionData() { return detection_data_; }
   ConnectionData &connectionData() { return connection_data_; }
+  RecordingData &recordingData() { return recording_data_; }
 
 private:
   QueueHandle_t frame_queue_ = nullptr;
@@ -66,4 +68,5 @@ private:
   uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
   DetectionData detection_data_;
   ConnectionData connection_data_;
+  RecordingData recording_data_;
 };

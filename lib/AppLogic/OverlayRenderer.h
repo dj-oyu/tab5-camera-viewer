@@ -4,6 +4,7 @@
 
 class DetectionData;
 class ConnectionData;
+class RecordingData;
 
 namespace OverlayRenderer {
 
@@ -15,6 +16,7 @@ void init(uint16_t *framebuffer);
 // - Framebuffer bottom (rows 1120-1279) → USB side (left)
 
 // Render both overlay bars
-void render(DetectionData &detectionData, ConnectionData &connectionData);
+void render(DetectionData &detectionData, ConnectionData &connectionData,
+            RecordingData &recordingData);
 
 } // namespace OverlayRenderer
