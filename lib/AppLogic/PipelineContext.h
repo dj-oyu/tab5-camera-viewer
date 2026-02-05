@@ -14,19 +14,23 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 
-struct FrameData {
+struct FrameData
+{
   uint8_t *buf;
   size_t len;
+  size_t aligned_len;
   bool is_linear;
 };
 
-struct DecodedFrameData {
+struct DecodedFrameData
+{
   int buf_idx;
   uint8_t *linear_buf;
   bool has_linear_buf;
 };
 
-struct SideLoadProfile {
+struct SideLoadProfile
+{
   float render_fps = 0.0f;
   uint8_t level = 0;
   uint32_t detection_min_interval_ms = 0;
@@ -34,9 +38,10 @@ struct SideLoadProfile {
   bool throttled = false;
 };
 
-class PipelineContext {
+class PipelineContext
+{
 public:
-  bool init();
+  [[nodiscard]] bool init();
 
   QueueHandle_t frameQueue() const { return frame_queue_; }
   QueueHandle_t decodedFrameQueue() const { return decoded_frame_queue_; }
@@ -49,19 +54,32 @@ public:
   esp_lcd_panel_handle_t panelHandle() const { return panel_handle_; }
   void setPanelHandle(esp_lcd_panel_handle_t handle) { panel_handle_ = handle; }
 
-  uint16_t *decodeBuffer(int idx) const { return decode_bufs_[idx]; }
+  uint16_t *decodeBuffer(int idx) { return decode_bufs_[idx]; }
+  const uint16_t *decodeBuffer(int idx) const { return decode_bufs_[idx]; }
+  uint8_t *decodeBufferBytes(int idx)
+  {
+    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
+  }
+  const uint8_t *decodeBufferBytes(int idx) const
+  {
+    return reinterpret_cast<const uint8_t *>(decode_bufs_[idx]);
+  }
   int nextDecodeIndex();
 
-  bool acquireLinear(uint8_t **out_buf);
+  [[nodiscard]] bool acquireLinear(uint8_t *&out_buf);
   void releaseLinear(uint8_t *buf);
-  bool acquireRenderBuffer(uint16_t **out_buf, TickType_t wait_ticks = 0);
+  [[nodiscard]] bool acquireRenderBuffer(uint16_t *&out_buf,
+                                         TickType_t wait_ticks = 0);
   void releaseRenderBuffer(uint16_t *buf);
   void updateRenderFps(float fps, uint32_t now_ms);
-  SideLoadProfile sideLoadProfile() const;
+  [[nodiscard]] SideLoadProfile sideLoadProfile() const;
 
   DetectionData &detectionData() { return detection_data_; }
+  const DetectionData &detectionData() const { return detection_data_; }
   ConnectionData &connectionData() { return connection_data_; }
+  const ConnectionData &connectionData() const { return connection_data_; }
   RecordingData &recordingData() { return recording_data_; }
+  const RecordingData &recordingData() const { return recording_data_; }
 
 private:
   QueueHandle_t frame_queue_ = nullptr;

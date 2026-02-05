@@ -7,14 +7,16 @@
 constexpr int MAX_DETECTIONS = 12;
 constexpr int MAX_LABEL_LEN = 32;
 
-struct Detection {
+struct Detection
+{
   char label[MAX_LABEL_LEN];
   float confidence;
 };
 
-class DetectionData {
+class DetectionData
+{
 public:
-  bool init();
+  [[nodiscard]] bool init();
 
   // Writer interface (DetectionTask)
   void beginUpdate();
@@ -24,7 +26,9 @@ public:
   void endUpdate();
 
   // Reader interface (RenderTask)
-  bool tryRead(Detection *out_detections, int *out_count, uint32_t *out_timestamp);
+  [[nodiscard]] bool tryRead(Detection *out_detections, int &out_count);
+  [[nodiscard]] bool tryRead(Detection *out_detections, int &out_count,
+                             uint32_t &out_timestamp);
 
 private:
   SemaphoreHandle_t mutex_ = nullptr;

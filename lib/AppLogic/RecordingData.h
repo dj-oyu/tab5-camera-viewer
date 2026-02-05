@@ -4,22 +4,25 @@
 #include <freertos/semphr.h>
 #include <cstdint>
 
-enum class RecordingState {
-  Idle,       // Not recording
-  Recording,  // Recording in progress
-  Pending,    // Processing request (immediate UI feedback)
-  Error       // Recording error
+enum class RecordingState
+{
+  Idle,      // Not recording
+  Recording, // Recording in progress
+  Pending,   // Processing request (immediate UI feedback)
+  Error      // Recording error
 };
 
-enum class PendingAction {
+enum class PendingAction
+{
   None,
   Start,
   Stop
 };
 
-class RecordingData {
+class RecordingData
+{
 public:
-  bool init();
+  [[nodiscard]] bool init();
 
   // Writer interface (RecordingTask)
   void setRecording(bool recording, const char *filename = nullptr);
@@ -28,19 +31,25 @@ public:
   void clearError();
 
   // Reader interface (OverlayRenderer)
-  RecordingState getState();
-  float getDuration();
-  bool hasError(char *out_error, size_t maxLen);
-  PendingAction getPendingAction();  // What action is pending
+  [[nodiscard]] RecordingState getState() const;
+  [[nodiscard]] float getDuration() const;
+  [[nodiscard]] bool hasError() const;
+  template <size_t N>
+  [[nodiscard]] bool hasError(char (&out_error)[N]) const
+  {
+    return hasError(out_error, N);
+  }
+  [[nodiscard]] PendingAction getPendingAction() const; // What action is pending
 
   // Touch interface (AppLogic -> RecordingTask)
-  void requestToggle();                 // Request start/stop toggle (sets Pending state immediately)
-  PendingAction checkPendingAction();   // Check and clear pending action
+  void requestToggle();                                   // Request start/stop toggle (sets Pending state immediately)
+  [[nodiscard]] PendingAction checkPendingAction() const; // Check and clear pending action
 
 private:
+  [[nodiscard]] bool hasError(char *out_error, size_t maxLen) const;
   SemaphoreHandle_t mutex_ = nullptr;
   RecordingState state_ = RecordingState::Idle;
-  RecordingState prevState_ = RecordingState::Idle;  // State before Pending
+  RecordingState prevState_ = RecordingState::Idle; // State before Pending
   PendingAction pendingAction_ = PendingAction::None;
   float duration_ = 0.0f;
   char filename_[64] = {0};

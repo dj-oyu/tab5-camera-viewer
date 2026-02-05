@@ -7,6 +7,7 @@ M5Stack Tab5でHTTP MJPEGストリームを高速表示するための3ステー
 ## システム構成
 
 ### ハードウェア
+
 - **SoC**: ESP32-P4 (Dual Core RISC-V, 360MHz)
 - **ディスプレイ**: ILI9881C (720x1280, MIPI DSI)
 - **メモリ**: 512KB RAM + 16MB SPIRAM
@@ -15,6 +16,7 @@ M5Stack Tab5でHTTP MJPEGストリームを高速表示するための3ステー
   - PPA (Pixel Processing Accelerator) - スケーリング・回転
 
 ### ソフトウェア
+
 - **フレームワーク**: Arduino ESP32 (PlatformIO)
 - **RTOS**: FreeRTOS
 - **ストリーム**: HTTP MJPEG (Transfer-Encoding: chunked)
@@ -59,15 +61,18 @@ Render:                |--R1--|--R2--|--R3--|--R4--|
 ## データ構造
 
 ### FrameData (Fetch → Decode)
+
 ```cpp
 struct FrameData {
     uint8_t *buf;      // JPEG圧縮データへのポインタ (Linear buffer)
     size_t len;        // データ長
+    size_t aligned_len; // 64-byte境界に揃えたデコード用長
     bool is_linear;    // 常にtrue（現在の実装）
 };
 ```
 
 ### DecodedFrameData (Decode → Render)
+
 ```cpp
 struct DecodedFrameData {
     int buf_idx;            // decode_bufs[0/1]のインデックス
@@ -146,18 +151,18 @@ Linear Buffer Pool ───────────────┘
 
 ### キュー (FreeRTOS Queue)
 
-| キュー名 | サイズ | 送信元 | 受信先 | 用途 |
-|---------|-------|--------|--------|------|
-| `frameQueue` | 3 | Fetch | Decode | JPEG圧縮データ |
-| `decodedFrameQueue` | 2 | Decode | Render | デコード済みRGB565 |
-| `linearFreeQueue` | 3 | Render | Fetch | Linear buffer再利用 |
-| `renderFreeQueue` | 2 | Render | Render | 描画バッファ再利用 |
+| キュー名            | サイズ | 送信元 | 受信先 | 用途                |
+| ------------------- | ------ | ------ | ------ | ------------------- |
+| `frameQueue`        | 3      | Fetch  | Decode | JPEG圧縮データ      |
+| `decodedFrameQueue` | 2      | Decode | Render | デコード済みRGB565  |
+| `linearFreeQueue`   | 3      | Render | Fetch  | Linear buffer再利用 |
+| `renderFreeQueue`   | 2      | Render | Render | 描画バッファ再利用  |
 
 ### セマフォ (FreeRTOS Semaphore)
 
-| セマフォ名 | 種類 | 用途 |
-|-----------|------|------|
-| `ppaDoneSema` | Binary | PPA処理完了通知 |
+| セマフォ名        | 種類   | 用途            |
+| ----------------- | ------ | --------------- |
+| `ppaDoneSema`     | Binary | PPA処理完了通知 |
 | `displayDoneSema` | Binary | DSI転送完了通知 |
 
 ### 同期フロー
@@ -251,12 +256,14 @@ CHUNK_TRAILER state:
 ### パイプライン効果
 
 **パイプライン前:**
+
 ```
 1フレーム = 5ms + 3ms + 8ms = 16ms
 FPS = 1000ms / 16ms = 62.5 FPS
 ```
 
 **パイプライン後:**
+
 ```
 スループット = 1000ms / max(5ms, 3ms, 8ms) = 125 FPS
 実効FPS = ~60 FPS (DSI律速)
@@ -272,24 +279,26 @@ FPS = 1000ms / 16ms = 62.5 FPS
 
 ### タイムアウト
 
-| 操作 | タイムアウト | 動作 |
-|------|-------------|------|
-| frameQueue受信 | 1000ms | vTaskDelay(1) |
-| decodedFrameQueue受信 | 1000ms | vTaskDelay(1) |
-| displayDoneSema | 500ms | セマフォ返却してスキップ |
-| ppaDoneSema | 無制限 | 待機 |
+| 操作                  | タイムアウト | 動作                     |
+| --------------------- | ------------ | ------------------------ |
+| frameQueue受信        | 1000ms       | vTaskDelay(1)            |
+| decodedFrameQueue受信 | 1000ms       | vTaskDelay(1)            |
+| displayDoneSema       | 500ms        | セマフォ返却してスキップ |
+| ppaDoneSema           | 無制限       | 待機                     |
 
 ### リソース枯渇
 
 **Linear Buffer枯渇:**
+
 ```cpp
-if (!ctx->acquireLinear(&active_buf)) {
+if (!ctx->acquireLinear(active_buf)) {
     taskYIELD();
     continue;  // バッファ確保まで待機
 }
 ```
 
 **Queue満杯:**
+
 ```cpp
 if (xQueueSend(frameQueue, &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
     releaseLinear(buf);  // 満杯時は即返却してドロップ

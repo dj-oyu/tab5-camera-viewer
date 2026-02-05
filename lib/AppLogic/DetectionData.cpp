@@ -1,18 +1,22 @@
 #include "DetectionData.h"
 #include <cstring>
 
-bool DetectionData::init() {
+bool DetectionData::init()
+{
   mutex_ = xSemaphoreCreateMutex();
   return mutex_ != nullptr;
 }
 
-void DetectionData::beginUpdate() {
-  if (mutex_) {
+void DetectionData::beginUpdate()
+{
+  if (mutex_)
+  {
     xSemaphoreTake(mutex_, portMAX_DELAY);
   }
 }
 
-void DetectionData::setDetectionCount(int count) {
+void DetectionData::setDetectionCount(int count)
+{
   if (count < 0)
     count = 0;
   if (count > MAX_DETECTIONS)
@@ -21,7 +25,8 @@ void DetectionData::setDetectionCount(int count) {
 }
 
 void DetectionData::setDetection(int index, const char *label,
-                                  float confidence) {
+                                 float confidence)
+{
   if (index < 0 || index >= MAX_DETECTIONS)
     return;
 
@@ -30,33 +35,58 @@ void DetectionData::setDetection(int index, const char *label,
   detections_[index].confidence = confidence;
 }
 
-void DetectionData::setTimestamp(uint32_t ts) {
+void DetectionData::setTimestamp(uint32_t ts)
+{
   timestamp_ = ts;
 }
 
-void DetectionData::endUpdate() {
+void DetectionData::endUpdate()
+{
   updated_ = true;
-  if (mutex_) {
+  if (mutex_)
+  {
     xSemaphoreGive(mutex_);
   }
 }
 
-bool DetectionData::tryRead(Detection *out_detections, int *out_count,
-                             uint32_t *out_timestamp) {
+bool DetectionData::tryRead(Detection *out_detections, int &out_count)
+{
   if (!mutex_)
     return false;
 
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1)) != pdTRUE) {
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1)) != pdTRUE)
+  {
     return false; // Writer is updating, skip this frame
   }
 
-  if (out_count) {
-    *out_count = count_;
+  out_count = count_;
+  if (out_detections && count_ > 0)
+  {
+    memcpy(out_detections, detections_, sizeof(Detection) * count_);
   }
-  if (out_timestamp) {
-    *out_timestamp = timestamp_;
+
+  bool was_updated = updated_;
+  updated_ = false;
+
+  xSemaphoreGive(mutex_);
+  return was_updated;
+}
+
+bool DetectionData::tryRead(Detection *out_detections, int &out_count,
+                            uint32_t &out_timestamp)
+{
+  if (!mutex_)
+    return false;
+
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1)) != pdTRUE)
+  {
+    return false; // Writer is updating, skip this frame
   }
-  if (out_detections && count_ > 0) {
+
+  out_count = count_;
+  out_timestamp = timestamp_;
+  if (out_detections && count_ > 0)
+  {
     memcpy(out_detections, detections_, sizeof(Detection) * count_);
   }
 
