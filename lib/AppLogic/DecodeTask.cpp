@@ -1,6 +1,8 @@
 #include "DecodeTask.h"
 #include "PipelineConfig.h"
 #include "PipelineContext.h"
+#include <Arduino.h>
+#include <esp_timer.h>
 
 namespace {
 void decodeTask(void *pvParameters) {
@@ -13,38 +15,66 @@ void decodeTask(void *pvParameters) {
       .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
       .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
   };
+  if (jpeg_new_decoder_engine(&eng_cfg, &decoder) != ESP_OK || !decoder) {
+    Serial.println("DecodeTask: Failed to create JPEG decoder");
+    vTaskDelete(nullptr);
+    return;
+  }
 
+  uint32_t perf_frames = 0;
+  uint32_t perf_errors = 0;
+  uint64_t perf_decode_us = 0;
+  uint32_t perf_window_start = millis();
   FrameData fd;
 
   while (1) {
     if (xQueueReceive(ctx->frameQueue(), &fd, pdMS_TO_TICKS(1000)) == pdTRUE) {
-      if (!decoder) {
-        jpeg_new_decoder_engine(&eng_cfg, &decoder);
-      }
-
       uint32_t out_size = 0;
       size_t process_len = (fd.len + BITSTREAM_PAD + 63) & ~63;
 
-      esp_cache_msync(reinterpret_cast<void *>(fd.buf), process_len,
-                      ESP_CACHE_MSYNC_FLAG_INVALIDATE);
-      __asm__ __volatile__("fence" ::: "memory");
-
       int current_idx = ctx->nextDecodeIndex();
-      jpeg_decoder_process(decoder, &dec_cfg, fd.buf, process_len,
-                           reinterpret_cast<uint8_t *>(
-                               ctx->decodeBuffer(current_idx)),
-                           DECODE_BUF_SIZE, &out_size);
+      int64_t decode_start = esp_timer_get_time();
+      esp_err_t ret = jpeg_decoder_process(
+          decoder, &dec_cfg, fd.buf, process_len,
+          reinterpret_cast<uint8_t *>(ctx->decodeBuffer(current_idx)),
+          DECODE_BUF_SIZE, &out_size);
+      perf_decode_us +=
+          static_cast<uint64_t>(esp_timer_get_time() - decode_start);
 
-      size_t aligned_size = (out_size + 63) & ~63;
-      esp_cache_msync(ctx->decodeBuffer(current_idx), aligned_size,
-                      ESP_CACHE_MSYNC_FLAG_DIR_M2C |
-                          ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+      if (ret != ESP_OK || out_size == 0) {
+        perf_errors++;
+        if (fd.is_linear) {
+          ctx->releaseLinear(fd.buf);
+        }
+        continue;
+      }
 
       DecodedFrameData dfd;
       dfd.buf_idx = current_idx;
       dfd.linear_buf = fd.is_linear ? fd.buf : nullptr;
       dfd.has_linear_buf = fd.is_linear;
       xQueueSend(ctx->decodedFrameQueue(), &dfd, portMAX_DELAY);
+      perf_frames++;
+
+      uint32_t now = millis();
+      if (perf_frames >= PERF_LOG_WINDOW_FRAMES ||
+          ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS &&
+           perf_frames > 0)) {
+        uint32_t window_ms = now - perf_window_start;
+        if (window_ms == 0) {
+          window_ms = 1;
+        }
+        Serial.printf(
+            "Decode Perf: fps=%.1f decode=%lluus errors=%u queues(in=%u out=%u)\n",
+            (1000.0f * perf_frames) / window_ms,
+            static_cast<unsigned long long>(perf_decode_us / perf_frames),
+            perf_errors, uxQueueMessagesWaiting(ctx->frameQueue()),
+            uxQueueMessagesWaiting(ctx->decodedFrameQueue()));
+        perf_frames = 0;
+        perf_errors = 0;
+        perf_decode_us = 0;
+        perf_window_start = now;
+      }
     } else {
       vTaskDelay(1);
     }

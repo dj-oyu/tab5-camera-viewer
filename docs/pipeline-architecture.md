@@ -28,18 +28,20 @@ M5Stack Tab5でHTTP MJPEGストリームを高速表示するための3ステー
 │                    3-Stage Pipeline                         │
 └─────────────────────────────────────────────────────────────┘
 
-Stage 1: Fetch Task (Priority 6, Core 1)
+Stage 1: Fetch Task (Priority 5, Core 1)
   [HTTP Stream] → [Chunked Decoder] → [Linear Buffer]
                                               ↓
-                                        frameQueue (2 slots)
+                                        frameQueue (3 slots)
                                               ↓
 Stage 2: Decode Task (Priority 5, Core 0)
   [JPEG HW Decoder] → decode_bufs[0/1]
                                               ↓
                                     decodedFrameQueue (2 slots)
                                               ↓
-Stage 3: Render Task (Priority 5, Core 1)
-  [PPA Transform] → [DSI Transfer] → Display
+Stage 3: Render Task (Priority 6, Core 1)
+  [PPA Transform] → [Overlay] → [DSI Transfer]
+                  ↑               ↓
+             renderFreeQueue (2 slots)
 ```
 
 ### タイムライン
@@ -80,15 +82,20 @@ struct DecodedFrameData {
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    SPIRAM (16MB)                         │
+│                  INTERNAL SRAM (優先領域)                 │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [0] (82KB)                                │
-│   - JPEGフレーム格納用                                   │
+│ Fetch RX buffer (32KB)                                    │
+│   - WiFiClient::read() の受信キャッシュ                   │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [1] (82KB)                                │
+│ Linear Buffers [0..N-1] (82KB x N, N=LINEAR_INTERNAL...) │
+│   - Fetch hot path優先配置 (確保失敗時はSPIRAMへフォールバック) │
+└──────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────┐
+│                    SPIRAM (16MB+)                        │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [2] (82KB)                                │
-│   - トリプルバッファリング                               │
+│ Linear Buffers [N..2] (82KB)                              │
+│   - トリプルバッファ残り領域                               │
 ├──────────────────────────────────────────────────────────┤
 │ Decode Buffers [0] (640×480×2 = 614KB)                  │
 │   - JPEG decode出力 (RGB565)                             │
@@ -96,8 +103,11 @@ struct DecodedFrameData {
 │ Decode Buffers [1] (640×480×2 = 614KB)                  │
 │   - ダブルバッファリング                                 │
 ├──────────────────────────────────────────────────────────┤
-│ Device Framebuffer (720×1280×2 = 1.76MB)                │
-│   - DSIパネルから取得（シングルバッファ）                │
+│ Render Buffers [0] (720×1280×2 = 1.76MB)                │
+│   - Render出力用                                         │
+├──────────────────────────────────────────────────────────┤
+│ Render Buffers [1] (720×1280×2 = 1.76MB)                │
+│   - DSI転送中と次フレーム生成を分離                       │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -118,11 +128,13 @@ Decode Buffers [0/1]              │
     ↓                             │
 decodedFrameQueue                 │
     ↓                             │
-PPA Transform                     │
+renderFreeQueue ───────────────┐  │
+    ↓                          │  │
+Render Buffer [0/1]            │  │
+    ↓                          │  │
+PPA Transform + Overlay        │  │
     ↓                             │
-Device Framebuffer                │
-    ↓                             │
-DSI Transfer                      │
+DSI Transfer (in-flight) ─────────┘
     ↓                             │
 Display                           │
                                   │
@@ -136,9 +148,10 @@ Linear Buffer Pool ───────────────┘
 
 | キュー名 | サイズ | 送信元 | 受信先 | 用途 |
 |---------|-------|--------|--------|------|
-| `frameQueue` | 2 | Fetch | Decode | JPEG圧縮データ |
+| `frameQueue` | 3 | Fetch | Decode | JPEG圧縮データ |
 | `decodedFrameQueue` | 2 | Decode | Render | デコード済みRGB565 |
 | `linearFreeQueue` | 3 | Render | Fetch | Linear buffer再利用 |
+| `renderFreeQueue` | 2 | Render | Render | 描画バッファ再利用 |
 
 ### セマフォ (FreeRTOS Semaphore)
 
@@ -152,11 +165,16 @@ Linear Buffer Pool ───────────────┘
 ```
 Render Task (Frame N):
     │
-    ├─ xSemaphoreTake(displayDoneSema) ← Frame N-1のDSI完了待ち
+    ├─ renderFreeQueueから描画先バッファ取得
     │
     ├─ PPAPipeline::transform() (非同期開始)
     │
     ├─ xSemaphoreTake(ppaDoneSema) ← PPA完了待ち
+    │
+    ├─ OverlayRenderer::render()
+    │
+    ├─ (in-flightバッファがある場合)
+    │   xSemaphoreTake(displayDoneSema) ← Frame N-1のDSI完了待ち
     │
     ├─ esp_lcd_panel_draw_bitmap() (DSI転送開始、非同期)
     │
@@ -273,8 +291,9 @@ if (!ctx->acquireLinear(&active_buf)) {
 
 **Queue満杯:**
 ```cpp
-xQueueSend(frameQueue, &fd, 0);  // タイムアウト0
-// 満杯ならフレームドロップ
+if (xQueueSend(frameQueue, &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
+    releaseLinear(buf);  // 満杯時は即返却してドロップ
+}
 ```
 
 ## メモリ使用量
@@ -283,9 +302,9 @@ xQueueSend(frameQueue, &fd, 0);  // タイムアウト0
 
 - Linear Buffers: 82KB × 3 = 246KB
 - Decode Buffers: 614KB × 2 = 1.2MB
-- Device Framebuffer: 1.76MB (DSIパネルが管理)
+- Render Buffers: 1.76MB × 2 = 3.52MB
 
-**合計: ~3.2MB (SPIRAM)**
+**合計: ~4.9MB (SPIRAM)**
 
 ### FreeRTOS
 
@@ -320,9 +339,25 @@ PANEL_WIDTH = 720
 PANEL_HEIGHT = 1280
 
 // バッファサイズ
-LINEAR_BUF_SIZE = 83558  // 82KB (max 66KB + 25% margin)
-LINEAR_BUF_COUNT = 3     // トリプルバッファ
+LINEAR_BUF_SIZE = 83558          // 82KB (max 66KB + 25% margin)
+LINEAR_BUF_COUNT = 3             // トリプルバッファ
+LINEAR_INTERNAL_CACHE_COUNT = 2  // 先頭2本を内部SRAM優先
+INTERNAL_CACHE_GUARD_BYTES = 131072 // 内部SRAM最低残量ガード
 DECODE_BUF_SIZE = max(STREAM, PANEL) * 2
+FETCH_RX_BUF_SIZE = 32768
+FETCH_TCP_RCVBUF_BYTES = 65536
+FETCH_BLOCK_TIMEOUT_MS = 4
+FETCH_COALESCE_MIN_BYTES = 8192
+FETCH_COALESCE_WAIT_US = 1600
+FETCH_COALESCE_POLL_US = 50
+FETCH_IDLE_BACKOFF_US = 200
+VERIFY_FETCH_ONLY_MODE = false
+VERIFY_WIFI_DIAG_LOG = false
+
+// 性能ログ / 負荷制御
+PERF_LOG_INTERVAL_MS = 2000
+FPS_THROTTLE_ON = 28.0
+FPS_THROTTLE_OFF = 29.5
 
 // タスク設定
 STACK_DEPTH = 16384
@@ -330,24 +365,11 @@ STACK_DEPTH = 16384
 
 ## デバッグ
 
-### パフォーマンスモニタリング
-
-```cpp
-// Render Task内
-frame_count++;
-if (frame_count >= 100) {
-    uint32_t now = millis();
-    Serial.printf("Render FPS: %.1f\n",
-                  100.0f * 1000.0f / (now - last_fps_time));
-    last_fps_time = now;
-    frame_count = 0;
-}
-```
-
 ### ログ出力
 
 - Stream connected - HTTP接続成功
-- Render FPS: XX.X - 100フレームごとのFPS
+- MJPEG FPS / Render FPS - 2秒窓ごとのFPS
+- Fetchは初回bootstrap後に `recv(MSG_DONTWAIT)` 直読みへ切り替え、read粒度を拡大
 
 ## 参考資料
 

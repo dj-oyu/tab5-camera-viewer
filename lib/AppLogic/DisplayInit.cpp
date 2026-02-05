@@ -3,7 +3,6 @@
 #include "PipelineContext.h"
 #include <Arduino.h>
 #include <M5Unified.h>
-#include <esp_heap_caps.h>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
 // Forward declaration for DPI panel event callbacks
@@ -38,18 +37,10 @@ bool DisplayInit::init(PipelineContext &ctx) {
   auto accessor = static_cast<Panel_DSI_Accessor *>(dsi);
   ctx.setPanelHandle(accessor->getHandle());
 
-  uint16_t *fb = nullptr;
+  uint16_t *panel_fb = nullptr;
   esp_lcd_dpi_panel_get_frame_buffer(ctx.panelHandle(), 1,
-                                     reinterpret_cast<void **>(&fb));
-
-  if (!fb) {
-    Serial.println("Failed to get framebuffer, allocating dedicated buffer");
-    fb = static_cast<uint16_t *>(heap_caps_aligned_alloc(
-        64, PANEL_WIDTH * PANEL_HEIGHT * 2,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  }
-  ctx.setFramebuffer(fb);
-  Serial.printf("Framebuffer: %p\n", fb);
+                                     reinterpret_cast<void **>(&panel_fb));
+  Serial.printf("Panel framebuffer: %p\n", panel_fb);
 
   esp_lcd_dpi_panel_event_callbacks_t cbs = {
       .on_color_trans_done = on_color_trans_done,

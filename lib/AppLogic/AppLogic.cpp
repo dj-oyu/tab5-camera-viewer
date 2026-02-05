@@ -44,7 +44,7 @@ void AppLogic::begin() {
   cfg.output_power = true;
   M5.begin(cfg);
 
-  Serial.println("AppLogic v64: Dual Framebuffer + PPA Zero-copy");
+  Serial.println("AppLogic v65: Double render buffer pipeline");
   Serial.printf("Panel: %dx%d\n", PANEL_WIDTH, PANEL_HEIGHT);
 
   if (!PPAPipeline::begin()) {
@@ -65,14 +65,19 @@ void AppLogic::begin() {
 
   vTaskDelay(1000);
 
-  // Core 0: Decode (HW JPEG decoder, low CPU usage)
-  // Core 1: Fetch + Render + Detection + Connection (Network I/O + display)
-  FetchTask::start(ctx, 6, 1);       // Core 1 - MJPEG stream
-  DecodeTask::start(ctx, 5, 0);      // Core 0 - HW decoder doesn't block WiFi
-  RenderTask::start(ctx, 5, 1);      // Core 1 - Display output
-  DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
-  ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
-  RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
+  // Core 0: Decode (HW JPEG decoder)
+  // Core 1: Render + Fetch + control tasks
+  // Render is kept at highest priority on Core 1 to avoid starvation from network parsing.
+  RenderTask::start(ctx, 6, 1);      // Core 1 - PPA + DSI submit
+  FetchTask::start(ctx, 5, 1);       // Core 1 - MJPEG stream parser
+  DecodeTask::start(ctx, 5, 0);      // Core 0 - JPEG HW decode
+  if (VERIFY_FETCH_ONLY_MODE) {
+    Serial.println("Verify mode: fetch-only (Detection/Connection/Recording disabled)");
+  } else {
+    DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
+    ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
+    RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
+  }
 }
 
 void AppLogic::update() {

@@ -8,8 +8,8 @@ class RecordingData;
 
 namespace OverlayRenderer {
 
-// Initialize with framebuffer pointer (called once)
-void init(uint16_t *framebuffer);
+// Initialize sprite and static resources (called once)
+void init();
 
 // Physical layout (landscape, USB left, camera right):
 // - Framebuffer top (rows 0-159) → Camera side (right)
@@ -17,6 +17,6 @@ void init(uint16_t *framebuffer);
 
 // Render both overlay bars
 void render(DetectionData &detectionData, ConnectionData &connectionData,
-            RecordingData &recordingData);
+            RecordingData &recordingData, uint16_t *framebuffer);
 
 } // namespace OverlayRenderer

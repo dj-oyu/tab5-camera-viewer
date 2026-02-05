@@ -24,8 +24,6 @@ void parseConnectionJson(const char *json, ConnectionData &data) {
   int mjpeg = doc["mjpeg"] | 0;
 
   data.update(total, webrtc, mjpeg);
-  Serial.printf("Connection parsed: total=%d, webrtc=%d, mjpeg=%d\n",
-                total, webrtc, mjpeg);
 }
 
 void connectionTask(void *pvParameters) {
@@ -43,8 +41,7 @@ void connectionTask(void *pvParameters) {
   HTTPClient http;
   String line;
   line.reserve(256);
-
-  Serial.printf("ConnectionTask: URL = %s\n", CONNECTIONS_URL);
+  uint32_t lastAppliedAt = 0;
 
   while (1) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -55,16 +52,11 @@ void connectionTask(void *pvParameters) {
     }
 
     data.setState(ConnectionState::Connecting);
-    Serial.println("ConnectionTask: begin()...");
     http.begin(httpClient, CONNECTIONS_URL);
     http.setTimeout(DETECTION_TIMEOUT_MS);
     http.setReuse(false);  // Don't reuse connection for SSE
 
-    Serial.println("ConnectionTask: GET()...");
-    uint32_t startTime = millis();
     int httpCode = http.GET();
-    Serial.printf("ConnectionTask: GET() took %lu ms, code=%d\n",
-                  millis() - startTime, httpCode);
     if (httpCode != 200) {
       Serial.printf("Connection HTTP failed: %d\n", httpCode);
       data.setState(ConnectionState::Error, httpCode);
@@ -90,7 +82,13 @@ void connectionTask(void *pvParameters) {
         if (line.startsWith("data: ")) {
           String jsonStr = line.substring(6); // Remove "data: " prefix
           if (jsonStr.length() > 0) {
-            parseConnectionJson(jsonStr.c_str(), data);
+            SideLoadProfile profile = ctx->sideLoadProfile();
+            uint32_t now = millis();
+            if (profile.connection_min_interval_ms == 0 ||
+                (now - lastAppliedAt) >= profile.connection_min_interval_ms) {
+              parseConnectionJson(jsonStr.c_str(), data);
+              lastAppliedAt = now;
+            }
           }
         }
         // SSE comment (keepalive) starts with ":"
