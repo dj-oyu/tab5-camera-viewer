@@ -10,6 +10,45 @@
 
 namespace {
 
+bool tryReadInt(const JsonObjectConst &obj, const char *key, int &out) {
+  JsonVariantConst value = obj[key];
+  if (value.is<int>()) {
+    out = value.as<int>();
+    return true;
+  }
+  if (value.is<long>()) {
+    out = static_cast<int>(value.as<long>());
+    return true;
+  }
+  if (value.is<float>()) {
+    out = static_cast<int>(value.as<float>());
+    return true;
+  }
+  if (value.is<double>()) {
+    out = static_cast<int>(value.as<double>());
+    return true;
+  }
+  return false;
+}
+
+int readBoxValue(const JsonObjectConst &det, const char *key1,
+                 const char *key2) {
+  int v = 0;
+  if (tryReadInt(det, key1, v) || (key2 && tryReadInt(det, key2, v))) {
+    return v;
+  }
+
+  JsonVariantConst bboxValue = det["bbox"];
+  if (bboxValue.is<JsonObjectConst>()) {
+    JsonObjectConst bbox = bboxValue.as<JsonObjectConst>();
+    if (tryReadInt(bbox, key1, v) || (key2 && tryReadInt(bbox, key2, v))) {
+      return v;
+    }
+  }
+
+  return 0;
+}
+
 void parseDetectionJson(const char *json, DetectionData &data) {
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, json);
@@ -40,8 +79,12 @@ void parseDetectionJson(const char *json, DetectionData &data) {
       label = "unknown";
     }
     float confidence = det["confidence"] | 0.0f;
+    int x = readBoxValue(det, "x", "left");
+    int y = readBoxValue(det, "y", "top");
+    int w = readBoxValue(det, "w", "width");
+    int h = readBoxValue(det, "h", "height");
 
-    data.setDetection(count, label, confidence);
+    data.setDetection(count, label, x, y, w, h, confidence);
     count++;
   }
   data.setDetectionCount(count);

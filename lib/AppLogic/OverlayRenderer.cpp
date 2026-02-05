@@ -72,6 +72,7 @@ namespace
     uint16_t *framebuffer = nullptr;
     bool bars_initialized = false;
     int detection_count = -1;
+    uint32_t detection_signature = 0;
     int conn_total = -1;
     int conn_webrtc = -1;
     int conn_mjpeg = -1;
@@ -95,6 +96,56 @@ namespace
   float cachedRecordingDuration = 0.0f;
   uint32_t lastRecordingBlinkTime = 0;
   bool recordingBlinkOn = true;
+
+  uint32_t rotl32(uint32_t v, uint8_t s)
+  {
+    return (v << s) | (v >> (32 - s));
+  }
+
+  uint32_t mix32(uint32_t h, uint32_t v)
+  {
+    h ^= v + 0x9E3779B9u + (h << 6) + (h >> 2);
+    return rotl32(h, 5);
+  }
+
+  uint32_t hashClassName(const char *name)
+  {
+    uint32_t h = 0x811C9DC5u;
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(name);
+    while (*p)
+    {
+      h ^= *p;
+      h = rotl32(h, 5) ^ 0xA24BAED5u;
+      ++p;
+    }
+    return h;
+  }
+
+  uint32_t hashDetection(const Detection &d)
+  {
+    // 4px quantization reduces tiny box jitter from forcing a redraw every frame.
+    int qx = d.x >> 2;
+    int qy = d.y >> 2;
+    int qw = d.w >> 2;
+    int qh = d.h >> 2;
+
+    uint32_t h = hashClassName(d.label);
+    h = mix32(h, static_cast<uint32_t>(qx));
+    h = mix32(h, static_cast<uint32_t>(qy));
+    h = mix32(h, static_cast<uint32_t>(qw));
+    h = mix32(h, static_cast<uint32_t>(qh));
+    return h;
+  }
+
+  uint32_t computeDetectionSignature(const Detection *detections, int count)
+  {
+    uint32_t hash = mix32(0xC2B2AE35u, static_cast<uint32_t>(count));
+    for (int i = 0; i < count; ++i)
+    {
+      hash = mix32(hash, hashDetection(detections[i]));
+    }
+    return hash;
+  }
 
   OverlayBufferSnapshot &snapshotFor(uint16_t *framebuffer)
   {
@@ -424,12 +475,15 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   // Read detection data
   static Detection cachedDetections[MAX_DETECTIONS];
   static int cachedCount = 0;
+  static uint32_t cachedDetectionSignature =
+      computeDetectionSignature(cachedDetections, 0);
 
   int count = 0;
 
   if (detectionData.tryRead(cachedDetections, count))
   {
     cachedCount = count;
+    cachedDetectionSignature = computeDetectionSignature(cachedDetections, cachedCount);
     lastDetectionTime = millis();
   }
 
@@ -457,6 +511,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     if (cachedCount > 0)
     {
       cachedCount = 0; // Clear cached detections
+      cachedDetectionSignature = computeDetectionSignature(cachedDetections, cachedCount);
       Serial.println("OverlayRenderer: Detection timeout, clearing display");
     }
   }
@@ -536,7 +591,8 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   }
   int tilesToUpdate = max(currTiles, prevTiles);
   bool detectionChanged =
-      (snapshot.detection_count < 0 || cachedCount != snapshot.detection_count);
+      (snapshot.detection_count < 0 || cachedCount != snapshot.detection_count ||
+       cachedDetectionSignature != snapshot.detection_signature);
 
   if (detectionChanged || currTiles != prevTiles)
   {
@@ -557,5 +613,6 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
 
     esp_cache_msync(bottomBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     snapshot.detection_count = cachedCount;
+    snapshot.detection_signature = cachedDetectionSignature;
   }
 }

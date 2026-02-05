@@ -24,14 +24,18 @@ void DetectionData::setDetectionCount(int count)
   count_ = count;
 }
 
-void DetectionData::setDetection(int index, const char *label,
-                                 float confidence)
+void DetectionData::setDetection(int index, const char *label, int x, int y,
+                                 int w, int h, float confidence)
 {
   if (index < 0 || index >= MAX_DETECTIONS)
     return;
 
   strncpy(detections_[index].label, label, MAX_LABEL_LEN - 1);
   detections_[index].label[MAX_LABEL_LEN - 1] = '\0';
+  detections_[index].x = x;
+  detections_[index].y = y;
+  detections_[index].w = w;
+  detections_[index].h = h;
   detections_[index].confidence = confidence;
 }
 

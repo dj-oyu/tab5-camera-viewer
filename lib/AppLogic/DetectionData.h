@@ -10,6 +10,10 @@ constexpr int MAX_LABEL_LEN = 32;
 struct Detection
 {
   char label[MAX_LABEL_LEN];
+  int x;
+  int y;
+  int w;
+  int h;
   float confidence;
 };
 
@@ -21,7 +25,8 @@ public:
   // Writer interface (DetectionTask)
   void beginUpdate();
   void setDetectionCount(int count);
-  void setDetection(int index, const char *label, float confidence);
+  void setDetection(int index, const char *label, int x, int y, int w, int h,
+                    float confidence);
   void setTimestamp(uint32_t ts);
   void endUpdate();
 
