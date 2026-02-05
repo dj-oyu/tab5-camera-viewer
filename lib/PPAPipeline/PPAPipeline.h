@@ -9,10 +9,22 @@
 
 class PPAPipeline {
 public:
-  static bool begin();
+  [[nodiscard]] static bool begin();
+
+  static void prepareConfig(ppa_srm_oper_config_t &config,
+                            uint32_t src_w, uint32_t src_h,
+                            uint32_t dst_w, uint32_t dst_h,
+                            ppa_srm_color_mode_t src_fmt,
+                            ppa_srm_color_mode_t dst_fmt,
+                            ppa_srm_rotation_angle_t rotation,
+                            float scale_x, float scale_y);
+
+  [[nodiscard]] static bool submit(ppa_srm_oper_config_t &config,
+                                   const uint8_t *src, uint8_t *dst,
+                                   SemaphoreHandle_t done_sem);
 
   // Copy/Scale/Rotate image using PPA hardware
-  static bool transform(const uint8_t *src, uint8_t *dst,
+  [[nodiscard]] static bool transform(const uint8_t *src, uint8_t *dst,
                        uint32_t src_w, uint32_t src_h,
                        uint32_t dst_w, uint32_t dst_h,
                        ppa_srm_color_mode_t src_fmt,
@@ -22,7 +34,7 @@ public:
                        SemaphoreHandle_t done_sem);
 
   // Simple copy with centering (no rotation/scale)
-  static bool copy(const uint8_t *src, uint8_t *dst,
+  [[nodiscard]] static bool copy(const uint8_t *src, uint8_t *dst,
                   uint32_t src_w, uint32_t src_h,
                   uint32_t dst_w, uint32_t dst_h,
                   ppa_srm_color_mode_t src_fmt,

@@ -2,33 +2,33 @@
 
 ## タスク一覧
 
-| タスク名 | 関数名 | Priority | Core | Stack | 役割 |
-|---------|--------|----------|------|-------|------|
-| Render | `renderTask` | 6 | 1 | 16KB | PPA変換 + Overlay + DSI submit |
-| Fetch | `fetchTask` | 5 | 1 | 16KB | HTTP MJPEG取得/解析 |
-| Decode | `decodeTask` | 5 | 0 | 16KB | JPEG HW Decode |
-| Detection | `detectionTask` | 4 | 1 | 8KB | Detection API (SSE) |
-| Connection | `connectionTask` | 4 | 1 | 8KB | Connection API (SSE) |
-| Recording | `recordingTask` | 1 | 1 | 8KB | Recording API |
+| タスク名   | 関数名           | Priority | Core | Stack | 役割                           |
+| ---------- | ---------------- | -------- | ---- | ----- | ------------------------------ |
+| Render     | `renderTask`     | 6        | 1    | 16KB  | PPA変換 + Overlay + DSI submit |
+| Fetch      | `fetchTask`      | 5        | 1    | 16KB  | HTTP MJPEG取得/解析            |
+| Decode     | `decodeTask`     | 5        | 0    | 16KB  | JPEG HW Decode                 |
+| Detection  | `detectionTask`  | 4        | 1    | 8KB   | Detection API (SSE)            |
+| Connection | `connectionTask` | 4        | 1    | 8KB   | Connection API (SSE)           |
+| Recording  | `recordingTask`  | 1        | 1    | 8KB   | Recording API                  |
 
 RenderをCore1で最優先にして、Fetchの連続パースで描画が飢餓状態になるのを防ぐ。
 `VERIFY_FETCH_ONLY_MODE=true` の間は Detection/Connection/Recording を起動しない。
 
 ## キュー/セマフォ
 
-| 名前 | サイズ/型 | 送信元 | 受信先 | 用途 |
-|------|-----------|--------|--------|------|
-| `linearFreeQueue` | 3 (`uint8_t*`) | Render | Fetch | JPEG入力バッファ再利用 |
-| `frameQueue` | 3 (`FrameData`) | Fetch | Decode | JPEG圧縮フレーム |
-| `decodedFrameQueue` | 2 (`DecodedFrameData`) | Decode | Render | デコード済みフレーム |
-| `renderFreeQueue` | 2 (`uint16_t*`) | Render | Render | 描画バッファ再利用 |
-| `ppaDoneSema` | Binary | PPA ISR | Render | PPA完了通知 |
-| `displayDoneSema` | Binary | DSI ISR | Render | DSI転送完了通知 |
+| 名前                | サイズ/型              | 送信元  | 受信先 | 用途                   |
+| ------------------- | ---------------------- | ------- | ------ | ---------------------- |
+| `linearFreeQueue`   | 3 (`uint8_t*`)         | Render  | Fetch  | JPEG入力バッファ再利用 |
+| `frameQueue`        | 3 (`FrameData`)        | Fetch   | Decode | JPEG圧縮フレーム       |
+| `decodedFrameQueue` | 2 (`DecodedFrameData`) | Decode  | Render | デコード済みフレーム   |
+| `renderFreeQueue`   | 2 (`uint16_t*`)        | Render  | Render | 描画バッファ再利用     |
+| `ppaDoneSema`       | Binary                 | PPA ISR | Render | PPA完了通知            |
+| `displayDoneSema`   | Binary                 | DSI ISR | Render | DSI転送完了通知        |
 
 ## 1. Fetch → Decode (`frameQueue`)
 
 ```cpp
-FrameData fd{.buf = buf, .len = len, .is_linear = true};
+FrameData fd{.buf = buf, .len = len, .aligned_len = aligned_len, .is_linear = true};
 if (xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
   ctx.releaseLinear(buf);  // decodeが詰まっているときはドロップして返却
 }
@@ -88,7 +88,7 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
   - 接続情報
   - 録画状態
   - 検出件数
-  の差分を判定して必要タイルのみ更新する。
+    の差分を判定して必要タイルのみ更新する。
 - ダブルバッファ切り替え時の「片側だけ古いUI」を防止。
 
 ## 5. バックプレッシャーとドロップ戦略

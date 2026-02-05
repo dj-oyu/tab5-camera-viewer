@@ -152,17 +152,17 @@ int PipelineContext::nextDecodeIndex() {
   return current;
 }
 
-bool PipelineContext::acquireLinear(uint8_t **out_buf) {
-  return xQueueReceive(linear_free_queue_, out_buf, 0) == pdTRUE;
+bool PipelineContext::acquireLinear(uint8_t *&out_buf) {
+  return xQueueReceive(linear_free_queue_, &out_buf, 0) == pdTRUE;
 }
 
 void PipelineContext::releaseLinear(uint8_t *buf) {
   xQueueSend(linear_free_queue_, &buf, 0);
 }
 
-bool PipelineContext::acquireRenderBuffer(uint16_t **out_buf,
+bool PipelineContext::acquireRenderBuffer(uint16_t *&out_buf,
                                           TickType_t wait_ticks) {
-  return xQueueReceive(render_free_queue_, out_buf, wait_ticks) == pdTRUE;
+  return xQueueReceive(render_free_queue_, &out_buf, wait_ticks) == pdTRUE;
 }
 
 void PipelineContext::releaseRenderBuffer(uint16_t *buf) {

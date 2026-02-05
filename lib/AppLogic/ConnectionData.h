@@ -4,23 +4,26 @@
 #include <freertos/semphr.h>
 #include <cstdint>
 
-enum class ConnectionState {
-  Connecting,  // Attempting to connect
-  Connected,   // Successfully connected and receiving data
-  Error        // Connection failed or disconnected
+enum class ConnectionState
+{
+  Connecting, // Attempting to connect
+  Connected,  // Successfully connected and receiving data
+  Error       // Connection failed or disconnected
 };
 
-class ConnectionData {
+class ConnectionData
+{
 public:
-  bool init();
+  [[nodiscard]] bool init();
 
   // Writer interface (ConnectionTask)
   void update(int total, int webrtc, int mjpeg);
   void setState(ConnectionState state, int httpCode = 0);
 
   // Reader interface (OverlayRenderer)
-  bool tryRead(int *out_total, int *out_webrtc, int *out_mjpeg);
-  ConnectionState getState(int *out_httpCode = nullptr);
+  [[nodiscard]] bool tryRead(int &out_total, int &out_webrtc, int &out_mjpeg);
+  [[nodiscard]] ConnectionState getState() const;
+  [[nodiscard]] ConnectionState getState(int &out_httpCode) const;
 
 private:
   SemaphoreHandle_t mutex_ = nullptr;
