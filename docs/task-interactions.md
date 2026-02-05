@@ -35,11 +35,16 @@ if (xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 
 - タイムアウト0送信によるバッファリークを解消。
 - `no_linear_waits` / `queue_drops` を周期ログで可視化。
-- Fetchの受信バッファ(`FETCH_RX_BUF_SIZE=16KB`)は内部SRAM優先で確保し、
+- Fetchの受信バッファ(`FETCH_RX_BUF_SIZE=32KB`)は内部SRAM優先で確保し、
   `LINEAR_INTERNAL_CACHE_COUNT`本のlinear bufferも内部SRAM優先で配置する
   （`INTERNAL_CACHE_GUARD_BYTES`を下回る場合/確保失敗時はSPIRAMへフォールバック）。
 - ソケットは `SO_RCVBUF` を拡大し、短時間coalescing(`FETCH_COALESCE_*`)で
   `bytes_per_read` を上げる。
+- raw pathは `SO_RCVTIMEO` による短いブロッキング受信
+  (`FETCH_BLOCK_TIMEOUT_MS`) を使う。
+- 初回ブロッキング受信後の追加入力は `MSG_DONTWAIT` で短時間drainし、
+  `FETCH_COALESCE_WAIT_US` の範囲でread粒度を高める。
+- 起動ログに `SO_RCVBUF` の要求値と実効値(`getsockopt`)を出し、実環境の縮退を確認する。
 - HTTP接続直後の初回のみ `WiFiClient::read` で受信をbootstrapし、その後は
   `stream.fd()` から `recv(MSG_DONTWAIT)` 直読みへ切り替える。
 

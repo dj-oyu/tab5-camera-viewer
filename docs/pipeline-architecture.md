@@ -84,7 +84,7 @@ struct DecodedFrameData {
 ┌──────────────────────────────────────────────────────────┐
 │                  INTERNAL SRAM (優先領域)                 │
 ├──────────────────────────────────────────────────────────┤
-│ Fetch RX buffer (16KB)                                    │
+│ Fetch RX buffer (32KB)                                    │
 │   - WiFiClient::read() の受信キャッシュ                   │
 ├──────────────────────────────────────────────────────────┤
 │ Linear Buffers [0..N-1] (82KB x N, N=LINEAR_INTERNAL...) │
@@ -344,10 +344,11 @@ LINEAR_BUF_COUNT = 3             // トリプルバッファ
 LINEAR_INTERNAL_CACHE_COUNT = 2  // 先頭2本を内部SRAM優先
 INTERNAL_CACHE_GUARD_BYTES = 131072 // 内部SRAM最低残量ガード
 DECODE_BUF_SIZE = max(STREAM, PANEL) * 2
-FETCH_RX_BUF_SIZE = 16384
+FETCH_RX_BUF_SIZE = 32768
 FETCH_TCP_RCVBUF_BYTES = 65536
-FETCH_COALESCE_MIN_BYTES = 4096
-FETCH_COALESCE_WAIT_US = 1200
+FETCH_BLOCK_TIMEOUT_MS = 4
+FETCH_COALESCE_MIN_BYTES = 8192
+FETCH_COALESCE_WAIT_US = 1600
 FETCH_COALESCE_POLL_US = 50
 FETCH_IDLE_BACKOFF_US = 200
 

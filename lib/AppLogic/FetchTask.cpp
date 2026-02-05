@@ -113,33 +113,35 @@ void initWiFi() {
 }
 
 void configureFetchSocket(WiFiClient &stream) {
+  int sockfd = stream.fd();
   int rcvbuf = static_cast<int>(FETCH_TCP_RCVBUF_BYTES);
   int rcvbuf_res =
       stream.setSocketOption(SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  int rcvbuf_eff = -1;
+  socklen_t eff_len = sizeof(rcvbuf_eff);
+  int rcvbuf_eff_res =
+      (sockfd >= 0)
+          ? getsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf_eff, &eff_len)
+          : -1;
+  timeval rcv_to = {};
+  rcv_to.tv_sec = FETCH_BLOCK_TIMEOUT_MS / 1000UL;
+  rcv_to.tv_usec = (FETCH_BLOCK_TIMEOUT_MS % 1000UL) * 1000UL;
+  int rcvto_res =
+      stream.setSocketOption(SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
   int nodelay_res = stream.setNoDelay(true);
-  Serial.printf("Fetch socket: rcvbuf=%lu(%s) nodelay=%s\n",
+  Serial.printf(
+      "Fetch socket: rcvbuf_req=%lu(%s) rcvbuf_eff=%d(%s) rcvto=%lums(%s) "
+      "nodelay=%s\n",
                 static_cast<unsigned long>(FETCH_TCP_RCVBUF_BYTES),
                 (rcvbuf_res == 0) ? "ok" : "fail",
+                rcvbuf_eff, (rcvbuf_eff_res == 0) ? "ok" : "fail",
+                static_cast<unsigned long>(FETCH_BLOCK_TIMEOUT_MS),
+                (rcvto_res == 0) ? "ok" : "fail",
                 (nodelay_res == 0) ? "on" : "fail");
 }
 
 bool isWouldBlockError(int err) {
   return err == EWOULDBLOCK || err == EAGAIN;
-}
-
-int waitReadable(int sockfd, uint32_t wait_us, uint64_t *wait_time_us) {
-  fd_set rfds;
-  FD_ZERO(&rfds);
-  FD_SET(sockfd, &rfds);
-  timeval tv = {};
-  tv.tv_sec = wait_us / 1000000UL;
-  tv.tv_usec = wait_us % 1000000UL;
-  int64_t wait_start = esp_timer_get_time();
-  int ready = select(sockfd + 1, &rfds, nullptr, nullptr, &tv);
-  if (wait_time_us) {
-    *wait_time_us = static_cast<uint64_t>(esp_timer_get_time() - wait_start);
-  }
-  return ready;
 }
 
 int readBootstrapStream(WiFiClient &stream, uint8_t *buf, size_t cap,
@@ -158,27 +160,21 @@ int readBootstrapStream(WiFiClient &stream, uint8_t *buf, size_t cap,
 
 int readRawSocketCoalesced(int sockfd, uint8_t *buf, size_t cap,
                            FetchPerfStats &perf) {
-  uint64_t select_wait_us = 0;
-  int ready = waitReadable(sockfd, FETCH_COALESCE_WAIT_US, &select_wait_us);
-  if (ready <= 0) {
-    perf.idle_wait_us += select_wait_us;
-    return 0;
-  }
-
   int64_t first_read_start = esp_timer_get_time();
-  int first = recv(sockfd, buf, cap, MSG_DONTWAIT);
+  size_t target = std::min<size_t>(cap, FETCH_COALESCE_MIN_BYTES);
+  int first = recv(sockfd, buf, target, MSG_WAITALL);
   uint64_t first_read_us =
       static_cast<uint64_t>(esp_timer_get_time() - first_read_start);
-  perf.read_wait_us += select_wait_us + first_read_us;
 
   if (first <= 0) {
     if (first < 0 && isWouldBlockError(errno)) {
-      perf.idle_wait_us += select_wait_us;
+      perf.idle_wait_us += first_read_us;
       return 0;
     }
     return first;
   }
 
+  perf.read_wait_us += first_read_us;
   perf.raw_reads++;
   size_t total = static_cast<size_t>(first);
   if (total >= FETCH_COALESCE_MIN_BYTES) {
@@ -187,11 +183,6 @@ int readRawSocketCoalesced(int sockfd, uint8_t *buf, size_t cap,
 
   int64_t coalesce_start = esp_timer_get_time();
   while (total < cap) {
-    int64_t elapsed = esp_timer_get_time() - coalesce_start;
-    if (elapsed >= static_cast<int64_t>(FETCH_COALESCE_WAIT_US)) {
-      break;
-    }
-
     int n = recv(sockfd, buf + total, cap - total, MSG_DONTWAIT);
     if (n > 0) {
       total += static_cast<size_t>(n);
@@ -203,6 +194,13 @@ int readRawSocketCoalesced(int sockfd, uint8_t *buf, size_t cap,
     }
 
     if (!isWouldBlockError(errno)) {
+      break;
+    }
+    if (FETCH_COALESCE_WAIT_US == 0) {
+      break;
+    }
+    int64_t elapsed = esp_timer_get_time() - coalesce_start;
+    if (elapsed >= static_cast<int64_t>(FETCH_COALESCE_WAIT_US)) {
       break;
     }
     esp_rom_delay_us(FETCH_COALESCE_POLL_US);
