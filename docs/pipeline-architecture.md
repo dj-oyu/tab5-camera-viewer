@@ -305,6 +305,12 @@ if (xQueueSend(frameQueue, &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 }
 ```
 
+## Overlay検出差分判定
+
+- `DetectionTask` はSSE payloadから `class_name` と bbox (`x,y,w,h`) を取り出して共有データへ反映する。
+- `OverlayRenderer` は `class_name + x,y,w,h` を元に、`xor/rotate/shift` ベースの軽量シグネチャを算出する。
+- bboxは4px量子化して微小ジッタを吸収し、件数が同じでも実検出が変わった場合のみ再描画する。
+
 ## メモリ使用量
 
 ### 静的割り当て
