@@ -109,6 +109,9 @@ void initWiFi() {
     Serial.print(".");
   }
   Serial.printf("\nWiFi Connected (RSSI=%d dBm)\n", WiFi.RSSI());
+  if (VERIFY_WIFI_DIAG_LOG) {
+    WiFi.printDiag(Serial);
+  }
 #endif
 }
 

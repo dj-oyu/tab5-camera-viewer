@@ -12,6 +12,7 @@
 | Recording | `recordingTask` | 1 | 1 | 8KB | Recording API |
 
 RenderをCore1で最優先にして、Fetchの連続パースで描画が飢餓状態になるのを防ぐ。
+`VERIFY_FETCH_ONLY_MODE=true` の間は Detection/Connection/Recording を起動しない。
 
 ## キュー/セマフォ
 

@@ -71,9 +71,13 @@ void AppLogic::begin() {
   RenderTask::start(ctx, 6, 1);      // Core 1 - PPA + DSI submit
   FetchTask::start(ctx, 5, 1);       // Core 1 - MJPEG stream parser
   DecodeTask::start(ctx, 5, 0);      // Core 0 - JPEG HW decode
-  DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
-  ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
-  RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
+  if (VERIFY_FETCH_ONLY_MODE) {
+    Serial.println("Verify mode: fetch-only (Detection/Connection/Recording disabled)");
+  } else {
+    DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
+    ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
+    RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
+  }
 }
 
 void AppLogic::update() {

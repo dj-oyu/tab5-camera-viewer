@@ -31,6 +31,10 @@ constexpr uint32_t FETCH_COALESCE_WAIT_US = 1600;
 constexpr uint32_t FETCH_COALESCE_POLL_US = 50;
 constexpr uint32_t FETCH_IDLE_BACKOFF_US = 200;
 
+// Verification toggles
+constexpr bool VERIFY_FETCH_ONLY_MODE = false; // Step-1 validation: disable side API tasks
+constexpr bool VERIFY_WIFI_DIAG_LOG = false;   // Step-3 validation: dump WiFi driver diag
+
 // Performance logging / control
 constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
 constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
