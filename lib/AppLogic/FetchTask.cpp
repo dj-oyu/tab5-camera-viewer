@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <errno.h>
 #include <esp_heap_caps.h>
 #include <esp_rom_sys.h>
 #include <esp_timer.h>
@@ -65,6 +66,8 @@ struct FetchPerfStats {
   uint32_t oversize_drops = 0;
   uint32_t no_linear_waits = 0;
   uint32_t coalesce_reads = 0;
+  uint32_t bootstrap_reads = 0;
+  uint32_t raw_reads = 0;
   uint64_t parse_us = 0;
   uint64_t sync_us = 0;
   uint64_t read_wait_us = 0;
@@ -120,20 +123,64 @@ void configureFetchSocket(WiFiClient &stream) {
                 (nodelay_res == 0) ? "on" : "fail");
 }
 
-int readCoalesced(WiFiClient &stream, uint8_t *buf, size_t cap,
-                  FetchPerfStats &perf) {
+bool isWouldBlockError(int err) {
+  return err == EWOULDBLOCK || err == EAGAIN;
+}
+
+int waitReadable(int sockfd, uint32_t wait_us, uint64_t *wait_time_us) {
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(sockfd, &rfds);
+  timeval tv = {};
+  tv.tv_sec = wait_us / 1000000UL;
+  tv.tv_usec = wait_us % 1000000UL;
+  int64_t wait_start = esp_timer_get_time();
+  int ready = select(sockfd + 1, &rfds, nullptr, nullptr, &tv);
+  if (wait_time_us) {
+    *wait_time_us = static_cast<uint64_t>(esp_timer_get_time() - wait_start);
+  }
+  return ready;
+}
+
+int readBootstrapStream(WiFiClient &stream, uint8_t *buf, size_t cap,
+                        FetchPerfStats &perf) {
   int64_t read_start = esp_timer_get_time();
   int bytes_read = stream.read(buf, cap);
-  uint64_t first_read_us =
-      static_cast<uint64_t>(esp_timer_get_time() - read_start);
-
-  if (bytes_read <= 0) {
-    perf.idle_wait_us += first_read_us;
-    return bytes_read;
+  uint64_t read_us = static_cast<uint64_t>(esp_timer_get_time() - read_start);
+  if (bytes_read > 0) {
+    perf.read_wait_us += read_us;
+    perf.bootstrap_reads++;
+  } else {
+    perf.idle_wait_us += read_us;
   }
-  perf.read_wait_us += first_read_us;
+  return bytes_read;
+}
 
-  size_t total = static_cast<size_t>(bytes_read);
+int readRawSocketCoalesced(int sockfd, uint8_t *buf, size_t cap,
+                           FetchPerfStats &perf) {
+  uint64_t select_wait_us = 0;
+  int ready = waitReadable(sockfd, FETCH_COALESCE_WAIT_US, &select_wait_us);
+  if (ready <= 0) {
+    perf.idle_wait_us += select_wait_us;
+    return 0;
+  }
+
+  int64_t first_read_start = esp_timer_get_time();
+  int first = recv(sockfd, buf, cap, MSG_DONTWAIT);
+  uint64_t first_read_us =
+      static_cast<uint64_t>(esp_timer_get_time() - first_read_start);
+  perf.read_wait_us += select_wait_us + first_read_us;
+
+  if (first <= 0) {
+    if (first < 0 && isWouldBlockError(errno)) {
+      perf.idle_wait_us += select_wait_us;
+      return 0;
+    }
+    return first;
+  }
+
+  perf.raw_reads++;
+  size_t total = static_cast<size_t>(first);
   if (total >= FETCH_COALESCE_MIN_BYTES) {
     return static_cast<int>(total);
   }
@@ -145,28 +192,38 @@ int readCoalesced(WiFiClient &stream, uint8_t *buf, size_t cap,
       break;
     }
 
-    int avail = stream.available();
-    if (avail <= 0) {
-      esp_rom_delay_us(FETCH_COALESCE_POLL_US);
+    int n = recv(sockfd, buf + total, cap - total, MSG_DONTWAIT);
+    if (n > 0) {
+      total += static_cast<size_t>(n);
+      perf.coalesce_reads++;
       continue;
     }
-
-    size_t to_read = std::min<size_t>(cap - total, static_cast<size_t>(avail));
-    int64_t extra_read_start = esp_timer_get_time();
-    int n = stream.read(buf + total, to_read);
-    perf.read_wait_us +=
-        static_cast<uint64_t>(esp_timer_get_time() - extra_read_start);
-    if (n <= 0) {
+    if (n == 0) {
       break;
     }
 
-    total += static_cast<size_t>(n);
-    perf.coalesce_reads++;
+    if (!isWouldBlockError(errno)) {
+      break;
+    }
+    esp_rom_delay_us(FETCH_COALESCE_POLL_US);
   }
+
   perf.coalesce_wait_us +=
       static_cast<uint64_t>(esp_timer_get_time() - coalesce_start);
-
   return static_cast<int>(total);
+}
+
+int readCoalesced(WiFiClient &stream, int sockfd, uint8_t *buf, size_t cap,
+                  bool &raw_mode, FetchPerfStats &perf) {
+  if (!raw_mode) {
+    int bootstrap = readBootstrapStream(stream, buf, cap, perf);
+    if (bootstrap > 0) {
+      raw_mode = true;
+      Serial.println("Fetch: switched to raw socket recv path");
+    }
+    return bootstrap;
+  }
+  return readRawSocketCoalesced(sockfd, buf, cap, perf);
 }
 
 // Parse byte stream and fill buffer.
@@ -360,7 +417,8 @@ void logFetchPerf(const FetchPerfStats &perf, uint32_t window_ms,
   Serial.printf(
       "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
       "sync=%lluus rwait=%lluus idle=%lluus cwait=%lluus reads=%u creads=%u "
-      "drops=%u ovf=%u reset=%u no_buf=%u queues(frame=%u linear=%u)\n",
+      "boot=%u raw=%u drops=%u ovf=%u reset=%u no_buf=%u "
+      "queues(frame=%u linear=%u)\n",
       fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
       static_cast<unsigned long long>(bytes_per_read),
       static_cast<unsigned long long>(perf.parse_us / frame_div),
@@ -368,8 +426,9 @@ void logFetchPerf(const FetchPerfStats &perf, uint32_t window_ms,
       static_cast<unsigned long long>(perf.read_wait_us / read_div),
       static_cast<unsigned long long>(perf.idle_wait_us / read_div),
       static_cast<unsigned long long>(perf.coalesce_wait_us / read_div),
-      perf.read_calls, perf.coalesce_reads, perf.queue_drops, perf.oversize_drops,
-      perf.parser_resets, perf.no_linear_waits,
+      perf.read_calls, perf.coalesce_reads, perf.bootstrap_reads, perf.raw_reads,
+      perf.queue_drops, perf.oversize_drops, perf.parser_resets,
+      perf.no_linear_waits,
       uxQueueMessagesWaiting(ctx.frameQueue()),
       uxQueueMessagesWaiting(ctx.linearFreeQueue()));
 }
@@ -427,12 +486,20 @@ void fetchTask(void *pvParameters) {
     Serial.println("Stream connected");
     WiFiClient &stream = http.getStream();
     configureFetchSocket(stream);
+    int stream_fd = stream.fd();
+    if (stream_fd < 0) {
+      Serial.println("Fetch: invalid stream fd");
+      http.end();
+      vTaskDelay(1000);
+      continue;
+    }
 
     uint32_t last_data_time = millis();
     uint32_t last_frame_time = millis();
     uint32_t perf_window_start = millis();
     FetchPerfStats perf;
     uint8_t *active_buf = nullptr;
+    bool raw_socket_mode = false;
     parser.reset();
 
     while (http.connected()) {
@@ -446,7 +513,8 @@ void fetchTask(void *pvParameters) {
         parser.write_ptr = 0;
       }
 
-      int bytes_read = readCoalesced(stream, rx_buf, FETCH_RX_BUF_SIZE, perf);
+      int bytes_read = readCoalesced(stream, stream_fd, rx_buf, FETCH_RX_BUF_SIZE,
+                                     raw_socket_mode, perf);
 
       if (bytes_read > 0) {
         perf.read_calls++;
@@ -504,9 +572,12 @@ void fetchTask(void *pvParameters) {
             }
           }
         }
-      } else {
+      } else if (bytes_read == 0) {
         taskYIELD();
         esp_rom_delay_us(FETCH_IDLE_BACKOFF_US);
+      } else {
+        Serial.printf("Fetch: read error (%d)\n", bytes_read);
+        break;
       }
 
       uint32_t now = millis();

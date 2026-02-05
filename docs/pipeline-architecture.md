@@ -366,6 +366,7 @@ STACK_DEPTH = 16384
 
 - Stream connected - HTTP接続成功
 - MJPEG FPS / Render FPS - 2秒窓ごとのFPS
+- Fetchは初回bootstrap後に `recv(MSG_DONTWAIT)` 直読みへ切り替え、read粒度を拡大
 
 ## 参考資料
 

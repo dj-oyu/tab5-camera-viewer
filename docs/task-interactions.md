@@ -40,6 +40,8 @@ if (xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
   （`INTERNAL_CACHE_GUARD_BYTES`を下回る場合/確保失敗時はSPIRAMへフォールバック）。
 - ソケットは `SO_RCVBUF` を拡大し、短時間coalescing(`FETCH_COALESCE_*`)で
   `bytes_per_read` を上げる。
+- HTTP接続直後の初回のみ `WiFiClient::read` で受信をbootstrapし、その後は
+  `stream.fd()` から `recv(MSG_DONTWAIT)` 直読みへ切り替える。
 
 ## 2. Decode → Render (`decodedFrameQueue`)
 
@@ -91,7 +93,7 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 
 ## 6. 計測ログ
 
-- Fetch: `Fetch Perf: fps=... mbps=... frame=... read=... parse=... sync=... rwait=... idle=... cwait=...`
+- Fetch: `Fetch Perf: fps=... mbps=... frame=... read=... parse=... sync=... rwait=... idle=... cwait=... boot=... raw=...`
 - Decode: `Decode Perf: fps=... decode=... errors=...`
 - Render: `Render Perf: fps=... buf_wait=... ppa=... overlay=... disp_wait=...`
 
