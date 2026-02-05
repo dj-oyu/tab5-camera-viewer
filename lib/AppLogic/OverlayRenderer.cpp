@@ -33,15 +33,36 @@ namespace
   constexpr int ROW_GAP = 12;
   constexpr int ROWS_PER_TILE = 4;
 
+  constexpr uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+  {
+    return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+  }
+
+  constexpr uint16_t panel565(uint16_t color)
+  {
+    return static_cast<uint16_t>((color << 8) | (color >> 8));
+  }
+
+  constexpr uint16_t panel565(uint8_t r, uint8_t g, uint8_t b)
+  {
+    return panel565(rgb565(r, g, b));
+  }
+
   // Colors (matching ui-simulator)
-  constexpr uint16_t BG_COLOR = 0x0841;    // Dark gray (#111111)
-  constexpr uint16_t METER_COLOR = 0x2444; // Dark green (#228822)
-  constexpr uint16_t TEXT_COLOR = TFT_WHITE;
-  constexpr uint16_t CONN_COLOR = TFT_CYAN;
-  constexpr uint16_t ERROR_COLOR = TFT_RED;
-  constexpr uint16_t CONNECTING_COLOR = TFT_ORANGE;
-  constexpr uint16_t REC_COLOR = 0xF800;      // Bright red for REC indicator
-  constexpr uint16_t REC_IDLE_COLOR = 0x4208; // Dark gray for idle REC
+  constexpr uint16_t BG_COLOR = panel565(0x11, 0x11, 0x11);    // Dark gray (#111111)
+  constexpr uint16_t METER_COLOR = panel565(0x22, 0x88, 0x22); // Dark green (#228822)
+  constexpr uint16_t TEXT_COLOR = panel565(0xFF, 0xFF, 0xFF);
+  constexpr uint16_t CONN_COLOR = panel565(0x00, 0xFF, 0xFF);
+  constexpr uint16_t ERROR_COLOR = panel565(0xFF, 0x00, 0x00);
+  constexpr uint16_t CONNECTING_COLOR = panel565(0xFF, 0xA5, 0x00);
+  constexpr uint16_t REC_COLOR = panel565(0xFF, 0x4D, 0x4D);      // Bright, lighter red for REC indicator
+  constexpr uint16_t REC_IDLE_COLOR = panel565(0x44, 0x44, 0x44); // Dark gray for idle REC
+  constexpr uint16_t REC_BG_IDLE = panel565(0xCC, 0x00, 0x00);    // REC idle button fill (#cc0000)
+  constexpr uint16_t REC_BG_RECORD = panel565(0x44, 0x44, 0x44);  // Recording button fill (dark gray)
+  constexpr uint16_t OK_GREEN = panel565(0x00, 0xFF, 0x00);
+  constexpr uint16_t WARN_YELLOW = panel565(0xFF, 0xFF, 0x00);
+  constexpr uint16_t DARK_GREY = panel565(0x55, 0x55, 0x55);
+  constexpr uint16_t DIM_RED = panel565(0x80, 0x00, 0x00);
 
   // Detection display timeout (clear display if no data for this long)
   constexpr uint32_t DETECTION_DISPLAY_TIMEOUT_MS = 3000;
@@ -187,12 +208,12 @@ namespace
     tileSprite.printf("Conn:%d", cachedConnectionTotal);
 
     y += ROW_HEIGHT + ROW_GAP;
-    tileSprite.setTextColor(TFT_GREEN);
+    tileSprite.setTextColor(OK_GREEN);
     tileSprite.setCursor(4, y);
     tileSprite.printf("WRT:%d", cachedConnectionWebrtc);
 
     y += ROW_HEIGHT + ROW_GAP;
-    tileSprite.setTextColor(TFT_YELLOW);
+    tileSprite.setTextColor(WARN_YELLOW);
     tileSprite.setCursor(4, y);
     tileSprite.printf("MJP:%d", cachedConnectionMjpeg);
   }
@@ -215,12 +236,12 @@ namespace
     if (isPending)
     {
       // Pending state: grayed button with "..." - immediate feedback
-      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x4208); // Dark gray
-      tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, TFT_DARKGREY);
+      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_BG_RECORD);
+      tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, DARK_GREY);
 
       // Animated dots based on blink state
       tileSprite.setTextSize(3);
-      tileSprite.setTextColor(TFT_YELLOW);
+      tileSprite.setTextColor(WARN_YELLOW);
       tileSprite.setCursor(BTN_X + 45, BTN_Y + (BTN_H - 24) / 2);
       tileSprite.print(recordingBlinkOn ? "..." : " . ");
     }
@@ -228,7 +249,7 @@ namespace
     {
       // Recording state: STOP button with red border
       // Button background
-      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x4208); // Dark gray fill
+      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_BG_RECORD);
       // Blinking red border
       if (recordingBlinkOn)
       {
@@ -237,7 +258,7 @@ namespace
       }
       else
       {
-        tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0x8000); // Dim red
+        tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, DIM_RED);
       }
 
       // Blinking red circle indicator
@@ -262,7 +283,7 @@ namespace
     {
       // Idle state: REC button
       // Red button background
-      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, 0xC000); // Dark red
+      tileSprite.fillRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_BG_IDLE);
       tileSprite.drawRoundRect(BTN_X, BTN_Y, BTN_W, BTN_H, BTN_RADIUS, REC_COLOR);
 
       // Red circle indicator
@@ -287,7 +308,7 @@ namespace
       int minutes = totalSeconds / 60;
       int seconds = totalSeconds % 60;
 
-      tileSprite.setTextColor(isRecording ? TFT_GREEN : TEXT_COLOR);
+      tileSprite.setTextColor(isRecording ? OK_GREEN : TEXT_COLOR);
       tileSprite.setCursor(BTN_X + 20, durationY);
       tileSprite.printf("%02d:%02d", minutes, seconds);
     }
@@ -361,6 +382,7 @@ void OverlayRenderer::init()
     Serial.println("OverlayRenderer: tileSprite FAILED");
     return;
   }
+  tileSprite.setSwapBytes(false);
   tileSprite.setRotation(3); // 270° CCW - text appears correct in landscape
   tileSprite.setTextSize(2);
   Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, internal SRAM)\n",
@@ -385,12 +407,13 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   OverlayBufferSnapshot &snapshot = snapshotFor(framebuffer);
   if (!snapshot.bars_initialized)
   {
+    uint16_t bg = BG_COLOR;
     for (int y = 0; y < OVERLAY_BAR_SIZE; ++y)
     {
       for (int x = 0; x < PANEL_WIDTH; ++x)
       {
-        topBar[y * PANEL_WIDTH + x] = BG_COLOR;
-        bottomBar[y * PANEL_WIDTH + x] = BG_COLOR;
+        topBar[y * PANEL_WIDTH + x] = bg;
+        bottomBar[y * PANEL_WIDTH + x] = bg;
       }
     }
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
@@ -507,6 +530,10 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   int currTiles = (cachedCount + ROWS_PER_TILE - 1) / ROWS_PER_TILE; // Round up
   int prevCount = snapshot.detection_count < 0 ? 0 : snapshot.detection_count;
   int prevTiles = (prevCount + ROWS_PER_TILE - 1) / ROWS_PER_TILE;
+  if (snapshot.detection_count < 0)
+  {
+    prevTiles = NUM_TILES;
+  }
   int tilesToUpdate = max(currTiles, prevTiles);
   bool detectionChanged =
       (snapshot.detection_count < 0 || cachedCount != snapshot.detection_count);

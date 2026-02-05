@@ -91,6 +91,15 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
     の差分を判定して必要タイルのみ更新する。
 - ダブルバッファ切り替え時の「片側だけ古いUI」を防止。
 
+### 4.1 Overlay描画経路と色順序
+
+- Overlayは`LGFX_Sprite`に描画したタイルを`memcpy`でフレームバッファへ転送する。
+- `setSwapBytes()`は`pushSprite()`の転送経路に効くが、`getBuffer()`経由の`memcpy`には影響しない。
+- このため、UIの色がずれる場合は「スプライト内部の色定義」をパネルの期待順序に合わせて事前にスワップする。
+  - 本実装では`panel565()`で色定義時にバイト順を整形し、`memcpy`は生転送に固定する。
+- PPAは動画領域(960x720)を毎フレーム更新する一方、Overlayは左右バーのみを任意タイミングで更新する。
+  - 色順序の変換はOverlay側で完結させると、PPAのFPSや更新タイミングに影響しない。
+
 ## 5. バックプレッシャーとドロップ戦略
 
 - `frameQueue`満杯時: Fetchでドロップして`linearFreeQueue`へ返却
