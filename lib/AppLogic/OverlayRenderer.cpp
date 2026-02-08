@@ -1,4 +1,5 @@
 #include "OverlayRenderer.h"
+#include "BatteryData.h"
 #include "ConnectionData.h"
 #include "DetectionData.h"
 #include "PipelineConfig.h"
@@ -63,6 +64,11 @@ namespace
   constexpr uint16_t WARN_YELLOW = panel565(0xFF, 0xFF, 0x00);
   constexpr uint16_t DARK_GREY = panel565(0x55, 0x55, 0x55);
   constexpr uint16_t DIM_RED = panel565(0x80, 0x00, 0x00);
+  constexpr uint16_t BATT_BORDER = panel565(0x88, 0x88, 0x88);
+  constexpr uint16_t BATT_GREEN = panel565(0x00, 0xCC, 0x66);
+  constexpr uint16_t BATT_YELLOW = panel565(0xCC, 0xCC, 0x00);
+  constexpr uint16_t BATT_RED = panel565(0xCC, 0x22, 0x22);
+  constexpr uint16_t BATT_BOLT = panel565(0xFF, 0xFF, 0x00);
 
   // Detection display timeout (clear display if no data for this long)
   constexpr uint32_t DETECTION_DISPLAY_TIMEOUT_MS = 3000;
@@ -81,6 +87,10 @@ namespace
     RecordingState rec_state = RecordingState::Idle;
     int rec_duration_sec = -1;
     bool rec_blink = true;
+    int batt_percent = -1;
+    bool batt_charging = false;
+    int batt_current_ma = 0;
+    int batt_voltage_mv = 0;
   };
 
   OverlayBufferSnapshot overlay_snapshots[RENDER_BUF_COUNT];
@@ -90,6 +100,12 @@ namespace
   int cachedConnectionMjpeg = 0;
   ConnectionState cachedConnectionState = ConnectionState::Connecting;
   int cachedConnectionHttpCode = 0;
+
+  // Battery state cache
+  int cachedBattPercent = -1;
+  bool cachedBattCharging = false;
+  int cachedBattCurrentMa = 0;
+  int cachedBattVoltageMv = 0;
 
   // Recording state cache
   RecordingState cachedRecordingState = RecordingState::Idle;
@@ -210,12 +226,85 @@ namespace
     }
   }
 
-  // Render connection count tile (Right bar, Tile 0 only)
-  void renderConnectionTile()
+  // Battery icon dimensions
+  constexpr int BATT_ICON_W = 80;
+  constexpr int BATT_ICON_H = 40;
+  constexpr int BATT_TERMINAL_W = 6;
+  constexpr int BATT_TERMINAL_H = 16;
+  constexpr int BATT_BORDER_W = 3;
+  constexpr int BATT_FILL_PAD = 3; // Inner padding for fill bar
+
+  uint16_t getBatteryColor(int percent)
+  {
+    if (percent > 50)
+      return BATT_GREEN;
+    if (percent > 20)
+      return BATT_YELLOW;
+    return BATT_RED;
+  }
+
+  void renderBatteryIcon(int x, int y, int percent, bool charging)
+  {
+    // Battery body outline
+    tileSprite.drawRect(x, y, BATT_ICON_W, BATT_ICON_H, BATT_BORDER);
+    tileSprite.drawRect(x + 1, y + 1, BATT_ICON_W - 2, BATT_ICON_H - 2, BATT_BORDER);
+
+    // Terminal nub on right side
+    int termX = x + BATT_ICON_W;
+    int termY = y + (BATT_ICON_H - BATT_TERMINAL_H) / 2;
+    tileSprite.fillRect(termX, termY, BATT_TERMINAL_W, BATT_TERMINAL_H, BATT_BORDER);
+
+    // Fill bar
+    int fillX = x + BATT_FILL_PAD;
+    int fillY = y + BATT_FILL_PAD;
+    int fillMaxW = BATT_ICON_W - BATT_FILL_PAD * 2 - BATT_BORDER_W + 1;
+    int fillH = BATT_ICON_H - BATT_FILL_PAD * 2 - BATT_BORDER_W + 1;
+    int fillW = (fillMaxW * percent) / 100;
+    if (fillW > 0)
+    {
+      tileSprite.fillRect(fillX, fillY, fillW, fillH, getBatteryColor(percent));
+    }
+
+    // Low battery: red border
+    if (percent <= 20)
+    {
+      tileSprite.drawRect(x, y, BATT_ICON_W, BATT_ICON_H, BATT_RED);
+      tileSprite.drawRect(x + 1, y + 1, BATT_ICON_W - 2, BATT_ICON_H - 2, BATT_RED);
+    }
+
+    // Lightning bolt when charging (drawn with triangles)
+    if (charging)
+    {
+      int cx = x + BATT_ICON_W / 2;
+      int cy = y + BATT_ICON_H / 2;
+      // Upper triangle (pointing down-right)
+      tileSprite.fillTriangle(
+          cx - 2, cy - 14,  // top
+          cx - 8, cy + 2,   // bottom-left
+          cx + 4, cy - 2,   // right
+          BATT_BOLT);
+      // Lower triangle (pointing up-left)
+      tileSprite.fillTriangle(
+          cx + 2, cy + 14,  // bottom
+          cx + 8, cy - 2,   // top-right
+          cx - 4, cy + 2,   // left
+          BATT_BOLT);
+    }
+  }
+
+  // Render status tile (Right bar, Tile 0): battery icon + connection counts
+  void renderStatusTile()
   {
     tileSprite.fillSprite(BG_COLOR);
 
-    int y = TILE_PADDING;
+    // Battery icon at top, centered horizontally
+    int battX = (TILE_WIDTH - BATT_ICON_W - BATT_TERMINAL_W) / 2;
+    int battY = TILE_PADDING;
+    int percent = (cachedBattPercent >= 0) ? cachedBattPercent : 0;
+    renderBatteryIcon(battX, battY, percent, cachedBattCharging);
+
+    // Connection rows below battery
+    int y = battY + BATT_ICON_H + ROW_GAP;
 
     // Handle error and connecting states
     if (cachedConnectionState == ConnectionState::Error)
@@ -253,12 +342,7 @@ namespace
       return;
     }
 
-    // Connected state - display connection counts
-    tileSprite.setTextColor(CONN_COLOR);
-    tileSprite.setCursor(4, y);
-    tileSprite.printf("Conn:%d", cachedConnectionTotal);
-
-    y += ROW_HEIGHT + ROW_GAP;
+    // Connected state - display WRT/MJP counts (no Conn total)
     tileSprite.setTextColor(OK_GREEN);
     tileSprite.setCursor(4, y);
     tileSprite.printf("WRT:%d", cachedConnectionWebrtc);
@@ -267,6 +351,28 @@ namespace
     tileSprite.setTextColor(WARN_YELLOW);
     tileSprite.setCursor(4, y);
     tileSprite.printf("MJP:%d", cachedConnectionMjpeg);
+  }
+
+  // Render debug tile (Right bar, Tile 1) - battery debug info
+  void renderDebugTile()
+  {
+    tileSprite.fillSprite(BG_COLOR);
+    tileSprite.setTextSize(2);
+    tileSprite.setTextColor(TEXT_COLOR);
+    tileSprite.setCursor(4, TILE_PADDING);
+    tileSprite.printf("BAT:%d%%", cachedBattPercent);
+
+    tileSprite.setCursor(4, TILE_PADDING + ROW_HEIGHT + ROW_GAP);
+    tileSprite.printf("%d.%02dV",
+                      cachedBattVoltageMv / 1000,
+                      (cachedBattVoltageMv % 1000) / 10);
+
+    tileSprite.setCursor(4, TILE_PADDING + (ROW_HEIGHT + ROW_GAP) * 2);
+    tileSprite.printf("%dmA", cachedBattCurrentMa);
+
+    tileSprite.setCursor(4, TILE_PADDING + (ROW_HEIGHT + ROW_GAP) * 3);
+    tileSprite.setTextColor(cachedBattCharging ? OK_GREEN : WARN_YELLOW);
+    tileSprite.print(cachedBattCharging ? "CHRG" : "DCHR");
   }
 
   // Render recording tile (Right bar, Tile 2) - Button design
@@ -446,7 +552,7 @@ void OverlayRenderer::init()
 }
 
 void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &connectionData,
-                             RecordingData &recordingData,
+                             RecordingData &recordingData, BatteryData &batteryData,
                              uint16_t *framebuffer)
 {
   if (!initialized || framebuffer == nullptr)
@@ -516,6 +622,20 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     }
   }
 
+  // Read battery data
+  int battPercent = 0;
+  bool battCharging = false;
+  int battCurrentMa = 0;
+  int battVoltageMv = 0;
+  if (batteryData.tryRead(battPercent, battCharging, battCurrentMa,
+                          battVoltageMv))
+  {
+    cachedBattPercent = battPercent;
+    cachedBattCharging = battCharging;
+    cachedBattCurrentMa = battCurrentMa;
+    cachedBattVoltageMv = battVoltageMv;
+  }
+
   // Read recording data
   RecordingState recState = recordingData.getState();
   float recDuration = recordingData.getDuration();
@@ -539,12 +659,17 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     lastRecordingBlinkTime = now;
   }
 
-  // === RIGHT BAR (Camera side, top in framebuffer) - Connection Count ===
+  // === RIGHT BAR (Camera side, top in framebuffer) - Status + Recording ===
   bool connChanged = (cachedConnectionTotal != snapshot.conn_total ||
                       cachedConnectionWebrtc != snapshot.conn_webrtc ||
                       cachedConnectionMjpeg != snapshot.conn_mjpeg ||
                       cachedConnectionState != snapshot.conn_state ||
                       cachedConnectionHttpCode != snapshot.conn_http_code);
+  bool battChanged = (cachedBattPercent != snapshot.batt_percent ||
+                      cachedBattCharging != snapshot.batt_charging ||
+                      cachedBattCurrentMa != snapshot.batt_current_ma ||
+                      cachedBattVoltageMv != snapshot.batt_voltage_mv);
+  bool statusChanged = connChanged || battChanged;
 
   const int recDurationSec = static_cast<int>(recDuration);
   bool recChanged =
@@ -554,9 +679,9 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
          recState == RecordingState::Pending) &&
         recordingBlinkOn != snapshot.rec_blink));
 
-  if (connChanged)
+  if (statusChanged)
   {
-    renderConnectionTile();
+    renderStatusTile();
     copyTileToBar(topBar, 0);
   }
 
@@ -566,9 +691,9 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     copyTileToBar(topBar, 2);
   }
 
-  if (connChanged || recChanged)
+  if (statusChanged || recChanged)
   {
-    tileSprite.fillSprite(BG_COLOR);
+    renderDebugTile();
     copyTileToBar(topBar, 1);
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     snapshot.conn_total = cachedConnectionTotal;
@@ -576,6 +701,10 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     snapshot.conn_mjpeg = cachedConnectionMjpeg;
     snapshot.conn_state = cachedConnectionState;
     snapshot.conn_http_code = cachedConnectionHttpCode;
+    snapshot.batt_percent = cachedBattPercent;
+    snapshot.batt_charging = cachedBattCharging;
+    snapshot.batt_current_ma = cachedBattCurrentMa;
+    snapshot.batt_voltage_mv = cachedBattVoltageMv;
     snapshot.rec_state = recState;
     snapshot.rec_duration_sec = recDurationSec;
     snapshot.rec_blink = recordingBlinkOn;

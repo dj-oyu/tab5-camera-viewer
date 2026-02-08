@@ -494,24 +494,27 @@ namespace
     uint64_t frame_div = (perf.frames > 0) ? perf.frames : 1;
     uint64_t read_div = (perf.read_calls > 0) ? perf.read_calls : 1;
 
-    Serial.printf("MJPEG FPS: %.1f\n", fps);
-    Serial.printf(
-        "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
-        "sync=%lluus rwait=%lluus idle=%lluus cwait=%lluus reads=%u creads=%u "
-        "boot=%u raw=%u drops=%u ovf=%u reset=%u no_buf=%u drain=%u "
-        "queues(frame=%u linear=%u)\n",
-        fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
-        static_cast<unsigned long long>(bytes_per_read),
-        static_cast<unsigned long long>(perf.parse_us / frame_div),
-        static_cast<unsigned long long>(perf.sync_us / frame_div),
-        static_cast<unsigned long long>(perf.read_wait_us / read_div),
-        static_cast<unsigned long long>(perf.idle_wait_us / read_div),
-        static_cast<unsigned long long>(perf.coalesce_wait_us / read_div),
-        perf.read_calls, perf.coalesce_reads, perf.bootstrap_reads, perf.raw_reads,
-        perf.queue_drops, perf.oversize_drops, perf.parser_resets,
-        perf.no_linear_waits, perf.drain_drops,
-        uxQueueMessagesWaiting(ctx.frameQueue()),
-        uxQueueMessagesWaiting(ctx.linearFreeQueue()));
+    if (VERBOSE_PERF_LOG)
+    {
+      Serial.printf("MJPEG FPS: %.1f\n", fps);
+      Serial.printf(
+          "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
+          "sync=%lluus rwait=%lluus idle=%lluus cwait=%lluus reads=%u creads=%u "
+          "boot=%u raw=%u drops=%u ovf=%u reset=%u no_buf=%u drain=%u "
+          "queues(frame=%u linear=%u)\n",
+          fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
+          static_cast<unsigned long long>(bytes_per_read),
+          static_cast<unsigned long long>(perf.parse_us / frame_div),
+          static_cast<unsigned long long>(perf.sync_us / frame_div),
+          static_cast<unsigned long long>(perf.read_wait_us / read_div),
+          static_cast<unsigned long long>(perf.idle_wait_us / read_div),
+          static_cast<unsigned long long>(perf.coalesce_wait_us / read_div),
+          perf.read_calls, perf.coalesce_reads, perf.bootstrap_reads, perf.raw_reads,
+          perf.queue_drops, perf.oversize_drops, perf.parser_resets,
+          perf.no_linear_waits, perf.drain_drops,
+          uxQueueMessagesWaiting(ctx.frameQueue()),
+          uxQueueMessagesWaiting(ctx.linearFreeQueue()));
+    }
   }
 
   void fetchTask(void *pvParameters)

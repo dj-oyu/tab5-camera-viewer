@@ -143,6 +143,11 @@ bool PipelineContext::init() {
     return false;
   }
 
+  if (!battery_data_.init()) {
+    Serial.println("Failed to init BatteryData");
+    return false;
+  }
+
   return true;
 }
 
@@ -210,7 +215,7 @@ void PipelineContext::updateRenderFps(float fps, uint32_t now_ms) {
       connectionIntervalMsForLevel(side_profile_.level);
   side_profile_.throttled = side_profile_.level > 0;
 
-  if (side_profile_.level != prev_level) {
+  if (VERBOSE_PERF_LOG && side_profile_.level != prev_level) {
     Serial.printf(
         "PerfCtrl: level=%u render_fps=%.1f det_int=%lu conn_int=%lu\n",
         side_profile_.level, side_profile_.render_fps,

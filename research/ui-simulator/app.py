@@ -84,6 +84,16 @@ recording_state = RecordingState()
 recording_state_lock = threading.Lock()
 recording_clients: List[queue.Queue] = []  # SSE clients for recording updates
 
+# Battery state
+@dataclass
+class BatteryState:
+    percent: int = 75
+    charging: bool = False
+
+battery_state = BatteryState()
+battery_state_lock = threading.Lock()
+battery_clients: List[queue.Queue] = []  # SSE clients for battery updates
+
 
 def broadcast_log(event_type: str, content: str):
     """Send raw API event to log clients"""
@@ -499,6 +509,27 @@ def broadcast_recording_state():
         recording_clients.remove(q)
 
 
+def broadcast_battery_state():
+    """Send battery state update to all connected SSE clients"""
+    with battery_state_lock:
+        data = {
+            "percent": battery_state.percent,
+            "charging": battery_state.charging
+        }
+
+    message = f"data: {json.dumps(data)}\n\n"
+
+    dead_clients = []
+    for q in battery_clients:
+        try:
+            q.put_nowait(message)
+        except queue.Full:
+            dead_clients.append(q)
+
+    for q in dead_clients:
+        battery_clients.remove(q)
+
+
 @app.route("/api/recording/start", methods=["POST"])
 def recording_start():
     """Start recording - proxy to device"""
@@ -634,6 +665,59 @@ def recording_stream():
                 recording_clients.remove(q)
 
     return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route("/api/battery")
+def get_battery():
+    """Get current battery state"""
+    with battery_state_lock:
+        return jsonify({
+            "percent": battery_state.percent,
+            "charging": battery_state.charging
+        })
+
+
+@app.route("/api/battery/stream")
+def battery_stream():
+    """SSE endpoint for real-time battery updates"""
+    def generate():
+        q = queue.Queue(maxsize=10)
+        battery_clients.append(q)
+
+        # Send initial state
+        with battery_state_lock:
+            data = {
+                "percent": battery_state.percent,
+                "charging": battery_state.charging
+            }
+        yield f"data: {json.dumps(data)}\n\n"
+
+        try:
+            while True:
+                try:
+                    message = q.get(timeout=30)
+                    yield message
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            if q in battery_clients:
+                battery_clients.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route("/api/battery/mock", methods=["POST"])
+def set_mock_battery():
+    """Set mock battery data for testing"""
+    from flask import request
+    data = request.json
+
+    with battery_state_lock:
+        battery_state.percent = max(0, min(100, data.get("percent", battery_state.percent)))
+        battery_state.charging = data.get("charging", battery_state.charging)
+
+    broadcast_battery_state()
+    return jsonify({"status": "ok"})
 
 
 def recording_status_poller():

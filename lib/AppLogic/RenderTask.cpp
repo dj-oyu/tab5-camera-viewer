@@ -99,20 +99,23 @@ namespace
       uint64_t frame_div = perf.frames > 0 ? perf.frames : 1;
       float window_fps = (1000.0f * perf.frames) / window_ms;
       ctx->updateRenderFps(window_fps, now);
-      Serial.printf("Render FPS: %.1f\n", window_fps);
-      Serial.printf(
-          "Render Perf: fps=%.1f buf_wait=%lluus ppa=%lluus overlay=%lluus "
-          "disp_wait=%lluus submit=%lluus drops=%u ppa_to=%u disp_to=%u "
-          "queues(decoded=%u render_free=%u)\n",
-          window_fps,
-          static_cast<unsigned long long>(perf.render_buf_wait_us / frame_div),
-          static_cast<unsigned long long>(perf.ppa_us / frame_div),
-          static_cast<unsigned long long>(perf.overlay_us / frame_div),
-          static_cast<unsigned long long>(perf.display_wait_us / frame_div),
-          static_cast<unsigned long long>(perf.submit_us / frame_div),
-          perf.render_buf_drops, perf.ppa_timeouts, perf.display_timeouts,
-          uxQueueMessagesWaiting(decoded_queue),
-          uxQueueMessagesWaiting(render_free_queue));
+      if (VERBOSE_PERF_LOG)
+      {
+        Serial.printf("Render FPS: %.1f\n", window_fps);
+        Serial.printf(
+            "Render Perf: fps=%.1f buf_wait=%lluus ppa=%lluus overlay=%lluus "
+            "disp_wait=%lluus submit=%lluus drops=%u ppa_to=%u disp_to=%u "
+            "queues(decoded=%u render_free=%u)\n",
+            window_fps,
+            static_cast<unsigned long long>(perf.render_buf_wait_us / frame_div),
+            static_cast<unsigned long long>(perf.ppa_us / frame_div),
+            static_cast<unsigned long long>(perf.overlay_us / frame_div),
+            static_cast<unsigned long long>(perf.display_wait_us / frame_div),
+            static_cast<unsigned long long>(perf.submit_us / frame_div),
+            perf.render_buf_drops, perf.ppa_timeouts, perf.display_timeouts,
+            uxQueueMessagesWaiting(decoded_queue),
+            uxQueueMessagesWaiting(render_free_queue));
+      }
       perf = {};
       perf_window_start = now;
     };
@@ -176,7 +179,8 @@ namespace
 
         int64_t overlay_start = esp_timer_get_time();
         OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
-                                ctx->recordingData(), render_buf);
+                                ctx->recordingData(), ctx->batteryData(),
+                                render_buf);
         perf.overlay_us +=
             static_cast<uint64_t>(esp_timer_get_time() - overlay_start);
 

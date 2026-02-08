@@ -1,4 +1,5 @@
 #include "AppLogic.h"
+#include "BatteryTask.h"
 #include "ConnectionTask.h"
 #include "DecodeTask.h"
 #include "DetectionTask.h"
@@ -77,6 +78,7 @@ void AppLogic::begin() {
     DetectionTask::start(ctx, 4, 1);   // Detection API (SSE stream)
     ConnectionTask::start(ctx, 4, 1);  // Connection API (SSE stream)
     RecordingTask::start(ctx, 1, 1);   // Recording API (low priority, won't block touch)
+    BatteryTask::start(ctx, 1, 1);     // Battery monitor (local M5.Power polling)
   }
 }
 

@@ -1,8 +1,64 @@
-# TODO: MJPEG FPS 改善
+# TODO: バッテリーUI実装
 
-## 解決済み: MJPEG FPS 低下 (22-25fps → 30fps)
+## 完了済み (UIシミュレータ)
+
+- [x] UIシミュレータにバッテリー表示を追加（右バー Tile 0）
+- [x] コネクション表示を実機合わせに修正（WRT/MJP 2行、Conn行削除）
+- [x] バッテリー＋コネクションをTile 0に統合
+- [x] バックエンド: BatteryState + SSE + mockエンドポイント
+
+## 完了済み (組込み側)
+
+- [x] `BatteryData` / `BatteryTask` / `PipelineContext` / `AppLogic` 統合
+- [x] `OverlayRenderer` バッテリーアイコン + WRT/MJP表示
+- [x] `VERBOSE_PERF_LOG` フラグ追加
+- [x] デバッグ用 Tile 1 表示追加
+
+## 完了済み (INA226 キャリブレーション再設定)
+
+- [x] BatteryTask で INA226 キャリブレーションレジスタ(0x05)を 3413 に上書き
+  - `M5.In_I2C.writeRegister(0x41, 0x05, buf, 2, 400000)` で直接書き込み
+- [x] 電流値を INA226 電流レジスタ(0x04)から直接読み取り
+  - `M5.In_I2C.readRegister(0x41, 0x04, buf, 2, 400000)` → `(int16_t)(buf[0]<<8|buf[1]) * 0.3` mA
+  - デバッグ Tile 1 で mA 値と電圧を表示
+- [x] 充電判定: 電流の符号で判定（正=充電、要実機確認）
+- [x] バッテリーレベル: バス電圧(0x02)からLiPoカーブで計算
+  - 5点区分線形補間: 4200mV=100%, 4060mV=75%, 3860mV=50%, 3700mV=25%, 3500mV=0%
+- [x] `BatteryData` に `currentMa` / `busVoltageMv` フィールドを追加（`chargingRaw` を置換）
+- [x] デバッグ Tile 1: BAT%, 電圧(V), 電流(mA), CHRG/DCHR の4行表示
+
+## 既知の問題: M5Unified Power API
+
+### getBatteryLevel() — 不正確（INA226直接読みで回避済み）
+
+- 2日間動作で90%を下回らなかった
+- USB接続で即100%に復帰 → 充電電圧をそのまま測定しているため実SOCと乖離
+- 原因: `getBusVoltage()` → 電圧→パーセント変換が充電中の電圧上昇を考慮しない
+
+### getBatteryCurrent() — 不正確 + ハング（INA226直接読みで回避済み）
+
+- M5Unified: `max_expected_current=2.0` → currentLSB=0.0000610, cal=16787
+- 公式サンプル: `max_expected_current=8.192` → currentLSB=0.0003, cal=3413
+- **キャリブレーションレジスタの値が約5倍違う** → 電流値が実態と異なる
+- USBホットプラグでI2Cハング（M5Unified I2C のタイムアウト処理の問題）
+
+### isCharging() — 常に充電中を返す（電流符号で回避済み）
+
+- CHG_STAT pin (IO Expander 1, pin 6) のHW信号が常にHIGH
+
+## 実機テスト（手動確認）
+
+- [ ] デバッグ Tile で電圧/電流の生値が妥当か確認
+- [ ] 充電中の電流符号を確認（正=充電 or 負=充電、必要なら `BatteryTask.cpp` の条件を反転）
+- [ ] 充電中の電圧上昇による%ズレを確認、必要なら充電時補正を追加
+- [ ] USB ホットプラグ耐性テスト
+  - M5Unified の In_I2C 経由でもハングするか確認
+  - ハングする場合: ポーリング間隔を長くする / I2C読み取りをタイムアウト保護
+
+## 既知の問題: MJPEG FPS 低下 (22-25fps)
 
 サーバーが 30fps で配信しているにもかかわらず、Tab5 側で 22-25fps しか出ない。
+INA226 変更以前から発生しており、バッテリー実装とは無関係。
 
 ### 計測データ
 
@@ -12,7 +68,7 @@ FPS: 30.5 | Frame: 43.8KB avg | BW: 11.0Mbps
 Receive Time: 1.2-12.5ms (avg 5.2ms)
 ```
 
-**Tab5 側 (変更前)**:
+**Tab5 側 (VERBOSE_PERF_LOG)**:
 ```
 MJPEG FPS: 22.5-25.0
 Fetch Perf: mbps=8.21-9.24 frame=45453b idle=510-742us cwait=1724-1824us
@@ -70,7 +126,7 @@ pioarduino を Git URL でインストールした場合、Hybrid Compile には
 | + `CONFIG_LWIP_TCP_WND_DEFAULT=16384` | OK | **SDIO クラッシュ** (同一症状) |
 | フラッシュサイズのみ (フルクリーン再ビルド) | OK | OK (FPS 20, mbps=7.36) |
 | + `TCP_WND=16384` + SRAM relief設定 | OK | **SDIO クラッシュ** (設定未反映、下記参照) |
-| + `TCP_WND=8192` + `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` | OK | **OK (FPS 30.3, mbps=8.73)** |
+| + `TCP_WND=8192` + `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` | OK | **OK (FPS 30.3, mbps=8.73)** ✅ |
 
 #### 結果: TCP_WND=8192 で 30fps 達成
 
@@ -83,7 +139,7 @@ MJPEG FPS: 30.3
 
 理論どおり TCP ウィンドウサイズがボトルネックだった:
 - TCP_WND=5760 → max ~9.2 Mbps → 22-25 fps
-- TCP_WND=8192 → max ~13.1 Mbps → **30.3 fps**
+- TCP_WND=8192 → max ~13.1 Mbps → **30.3 fps** ✅
 
 #### SDIO クラッシュの詳細
 
@@ -103,6 +159,10 @@ pioarduino の Hybrid Compile が `custom_sdkconfig` を sdkconfig.defaults に�
 - **Replace**: 既存キーの値を置換 → 正しく反映される
 - **Add**: 新規キーをファイル末尾に追加 → 旧名エイリアスや Kconfig choice で上書きされる場合あり
 
+TCP_WND=16384 テスト時に以下の設定が反映されなかった:
+- `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6` → 旧名 `CONFIG_ESP32_WIFI_*` が後方にデフォルト値で残存
+- `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_400=y` → "Add" で末尾追加されたが Kconfig choice 解決で無視
+
 #### 切り分け結果
 
 - [x] **Step 1: Hybrid Compile 自体の影響を切り分け**
@@ -110,5 +170,41 @@ pioarduino の Hybrid Compile が `custom_sdkconfig` を sdkconfig.defaults に�
   - **結論: Hybrid Compile 自体は問題なし、TCP_WND 変更が SDIO クラッシュの原因**
 
 - [x] **Step 2: TCP_WND=8192 で SDIO クラッシュ回避 + FPS 改善**
-  - TCP_WND=8192 + SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y → **30.3 fps 達成**
+  - TCP_WND=8192 + SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y → **30.3 fps 達成** ✅
   - 起動時に散発的な USB CDC ISR クラッシュあり（再起動で解消、TCP_WND とは無関係）
+
+## クリーンアップ（動作確認後）
+
+- [ ] デバッグ用 Tile 1 (renderDebugTile) を削除
+- [ ] 充電検出が安定したら稲妻マーク表示を有効化
+- [ ] バッテリーアイコンの表示微調整
+- [ ] LiPo電圧カーブの微調整（実測データに基づく）
+
+## 参考
+
+### INA226 キャリブレーション計算（公式サンプル準拠）
+
+```
+shunt_res = 0.005 Ω
+max_expected_current = 8.192 A
+minimumLSB = 8.192 / 32767 = 0.000250
+currentLSB = ceil(0.000250 / 0.0001) * 0.0001 = 0.0003 A
+cal = 0.00512 / (0.0003 * 0.005) = 3413
+```
+
+### INA226 レジスタマップ（使用するもの）
+
+| Reg | 名称 | 用途 |
+|-----|------|------|
+| 0x02 | BUS_V | バス電圧 (raw × 0.00125 = V) |
+| 0x04 | CURRENT | 電流 (raw × currentLSB = A) |
+| 0x05 | CALIBRATION | キャリブレーション (書き込み: 3413) |
+
+### リンク
+
+- 公式サンプル: `sample/tab5-userdemo/components/power_monitor_ina226/`
+  - `calibrate(0.005, 8.192)` — `hal_esp32.cpp:80`
+  - `readShuntCurrent()` — `hal_power.cpp:24`
+- M5Unified INA226_Class: `.pio/libdeps/.../utility/power/INA226_Class.cpp`
+- INA226 I2C アドレス: `0x41`、シャント抵抗: `5mΩ`
+- シミュレータ: `cd research/ui-simulator && uv run app.py`
