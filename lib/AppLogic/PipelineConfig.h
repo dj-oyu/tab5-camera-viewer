@@ -19,7 +19,7 @@ constexpr uint32_t DECODE_BUF_SIZE =
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
 constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ
-constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 1; // Linear bufferのうち内部SRAM優先数 (2→1: SDIO用内部SRAM確保)
+constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 2; // Linear bufferのうち内部SRAM優先数
 constexpr uint32_t INTERNAL_CACHE_GUARD_BYTES = 128 * 1024; // 内部SRAMを使い切らないための最低確保量
 constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
 constexpr uint32_t RENDER_BUF_COUNT = 2;      // Display submit用ダブルバッファ
