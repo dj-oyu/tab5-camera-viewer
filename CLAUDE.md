@@ -80,6 +80,12 @@ cd research/ui-simulator && uv run app.py
 
 **Detection Flicker**: Detection list changes every frame (no temporal smoothing). See `research/detection-display-stability.md` for proposed solutions.
 
+**esptool.py / click 互換性**: `click` 8.2+ で `ParamType.get_metavar()` のシグネチャが変わり、`esptool.py` v5.0.0-dev1 のブートローダービルドが失敗する。`click` 8.1.x にダウングレードすれば解消:
+```bash
+# PlatformIO 仮想環境の click をダウングレード
+& "$env:USERPROFILE\.platformio\penv\Scripts\pip.exe" install "click<8.2"
+```
+
 ## Development Rules
 
 - **実装後のドキュメント更新**: アーキテクチャやバッファ構成を変更した場合は、`docs/` 配下のドキュメントも必ず更新すること

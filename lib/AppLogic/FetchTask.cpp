@@ -72,6 +72,7 @@ namespace
     uint32_t parser_resets = 0;
     uint32_t oversize_drops = 0;
     uint32_t no_linear_waits = 0;
+    uint32_t drain_drops = 0;
     uint32_t coalesce_reads = 0;
     uint32_t bootstrap_reads = 0;
     uint32_t raw_reads = 0;
@@ -364,7 +365,7 @@ namespace
               }
 
               parser.header_idx = 0;
-              parser.frame_overflow = false;
+              parser.frame_overflow = (linear_buf == nullptr);
               parser.state = MjpegState::JPEG_BODY;
               break;
             }
@@ -497,7 +498,7 @@ namespace
     Serial.printf(
         "Fetch Perf: fps=%.1f mbps=%.2f frame=%llub read=%llub parse=%lluus "
         "sync=%lluus rwait=%lluus idle=%lluus cwait=%lluus reads=%u creads=%u "
-        "boot=%u raw=%u drops=%u ovf=%u reset=%u no_buf=%u "
+        "boot=%u raw=%u drops=%u ovf=%u reset=%u no_buf=%u drain=%u "
         "queues(frame=%u linear=%u)\n",
         fps, fetch_mbps, static_cast<unsigned long long>(avg_frame_bytes),
         static_cast<unsigned long long>(bytes_per_read),
@@ -508,7 +509,7 @@ namespace
         static_cast<unsigned long long>(perf.coalesce_wait_us / read_div),
         perf.read_calls, perf.coalesce_reads, perf.bootstrap_reads, perf.raw_reads,
         perf.queue_drops, perf.oversize_drops, perf.parser_resets,
-        perf.no_linear_waits,
+        perf.no_linear_waits, perf.drain_drops,
         uxQueueMessagesWaiting(ctx.frameQueue()),
         uxQueueMessagesWaiting(ctx.linearFreeQueue()));
   }
@@ -640,8 +641,15 @@ namespace
             {
               if (parser.frame_overflow)
               {
-                perf.oversize_drops++;
-                xQueueSend(linear_free_queue, &active_buf, 0);
+                if (active_buf)
+                {
+                  perf.oversize_drops++;
+                  xQueueSend(linear_free_queue, &active_buf, 0);
+                }
+                else
+                {
+                  perf.drain_drops++;
+                }
               }
               else
               {
@@ -669,11 +677,13 @@ namespace
                 if (xQueueReceive(linear_free_queue, &active_buf, 0) != pdTRUE)
                 {
                   perf.no_linear_waits++;
-                  perf.parser_resets++;
-                  parser.reset();
-                  break;
+                  // Drain mode: keep parsing to maintain stream sync
+                  parser.frame_overflow = true;
                 }
-                parser.write_ptr = 0;
+                else
+                {
+                  parser.write_ptr = 0;
+                }
               }
             }
           }

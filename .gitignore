@@ -6,3 +6,15 @@
 *.idx
 *.env*
 sample/tab5-userdemo
+.claude/settings.local.json
+
+# Hybrid Compile (custom_sdkconfig) generated files
+.dummy/
+managed_components/
+sdkconfig.defaults
+sdkconfig.*
+*.map
+build_verbose.log
+
+# Python cache
+__pycache__/
