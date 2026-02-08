@@ -5,5 +5,6 @@
 class PipelineContext;
 
 namespace FetchTask {
+void initWiFi();
 void start(PipelineContext &ctx, UBaseType_t priority = 6, BaseType_t core = 1);
 }
