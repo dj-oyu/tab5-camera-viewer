@@ -36,6 +36,15 @@ namespace
     {
       if (xQueueReceive(frame_queue, &fd, pdMS_TO_TICKS(1000)) == pdTRUE)
       {
+        // Quick SOI/EOI marker check to avoid 100ms HW decoder timeout on corrupt data
+        if (fd.len < 4 || fd.buf[0] != 0xFF || fd.buf[1] != 0xD8 ||
+            fd.buf[fd.len - 2] != 0xFF || fd.buf[fd.len - 1] != 0xD9)
+        {
+          perf_errors++;
+          if (fd.is_linear) { ctx->releaseLinear(fd.buf); }
+          continue;
+        }
+
         uint32_t out_size = 0;
         size_t process_len = fd.aligned_len;
 

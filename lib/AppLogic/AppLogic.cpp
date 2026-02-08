@@ -47,10 +47,6 @@ void AppLogic::begin() {
   Serial.println("AppLogic v65: Double render buffer pipeline");
   Serial.printf("Panel: %dx%d\n", PANEL_WIDTH, PANEL_HEIGHT);
 
-  // WiFi first: SDIO driver needs internal SRAM for DMA queues
-  // Must run before buffer allocation to avoid internal SRAM exhaustion
-  FetchTask::initWiFi();
-
   if (!PPAPipeline::begin()) {
     Serial.println("Failed to initialize PPA Pipeline!");
   }

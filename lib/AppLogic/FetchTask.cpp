@@ -113,28 +113,24 @@ namespace
     return xQueueSend(frame_queue, &fd, pdMS_TO_TICKS(1)) == pdTRUE;
   }
 
-} // namespace
-
-void FetchTask::initWiFi()
-{
+  void initWiFi()
+  {
 #ifdef WIFI_SSID
-  WiFi.setPins(12, 13, 11, 10, 9, 8, 15);
-  WiFi.setSleep(false); // keep radio active for stable throughput
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(100);
-    Serial.print(".");
-  }
-  Serial.printf("\nWiFi Connected (RSSI=%d dBm)\n", WiFi.RSSI());
-  if (VERIFY_WIFI_DIAG_LOG)
-  {
-    WiFi.printDiag(Serial);
-  }
+    WiFi.setPins(12, 13, 11, 10, 9, 8, 15);
+    WiFi.setSleep(false); // keep radio active for stable throughput
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      delay(100);
+      Serial.print(".");
+    }
+    Serial.printf("\nWiFi Connected (RSSI=%d dBm)\n", WiFi.RSSI());
+    if (VERIFY_WIFI_DIAG_LOG)
+    {
+      WiFi.printDiag(Serial);
+    }
 #endif
-}
-
-namespace {
+  }
 
   void configureFetchSocket(WiFiClient &stream)
   {
@@ -523,6 +519,7 @@ namespace {
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto frame_queue = ctx->frameQueue();
     auto linear_free_queue = ctx->linearFreeQueue();
+    initWiFi();
 
 #ifdef MJPEG_URL
     HTTPClient http;
