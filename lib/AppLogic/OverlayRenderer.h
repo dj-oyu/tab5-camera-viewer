@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+class BatteryData;
 class DetectionData;
 class ConnectionData;
 class RecordingData;
@@ -17,6 +18,7 @@ void init();
 
 // Render both overlay bars
 void render(DetectionData &detectionData, ConnectionData &connectionData,
-            RecordingData &recordingData, uint16_t *framebuffer);
+            RecordingData &recordingData, BatteryData &batteryData,
+            uint16_t *framebuffer);
 
 } // namespace OverlayRenderer

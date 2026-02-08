@@ -545,6 +545,98 @@
             background: #cc0000;
             color: #fff;
         }
+
+        /* Connection display styles (matching OverlayRenderer) */
+        .connection-display {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            width: 100%;
+        }
+
+        .conn-row {
+            font-family: monospace;
+            font-size: 28px;
+            font-weight: bold;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            padding: 0 4px;
+        }
+
+        /* Combined status tile (battery + connections) */
+        .status-tile {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 6px 0;
+            gap: 12px;
+        }
+
+        .battery-icon {
+            position: relative;
+            width: 80px;
+            height: 40px;
+            border: 3px solid #888;
+            border-radius: 6px;
+            background: #111;
+        }
+
+        .battery-icon::after {
+            content: '';
+            position: absolute;
+            right: -8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 6px;
+            height: 16px;
+            background: #888;
+            border-radius: 0 3px 3px 0;
+        }
+
+        .battery-fill {
+            position: absolute;
+            left: 3px;
+            top: 3px;
+            bottom: 3px;
+            border-radius: 3px;
+            transition: width 0.5s ease, background 0.3s ease;
+            min-width: 0;
+        }
+
+        .battery-fill.green {
+            background: linear-gradient(90deg, #00cc66, #00ff88);
+        }
+
+        .battery-fill.yellow {
+            background: linear-gradient(90deg, #cccc00, #ffff00);
+        }
+
+        .battery-fill.red {
+            background: linear-gradient(90deg, #cc2222, #ff4444);
+        }
+
+        .battery-bolt {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px;
+            height: 28px;
+            z-index: 2;
+            display: none;
+        }
+
+        .battery-bolt.visible {
+            display: block;
+        }
+
+        .battery-bolt svg {
+            width: 100%;
+            height: 100%;
+            filter: drop-shadow(0 0 3px rgba(255, 255, 0, 0.8));
+        }
+
     </style>
 </head>
 <body>
@@ -591,7 +683,20 @@
                 <!-- Right bar (Camera side, top bar in framebuffer) -->
                 <div class="overlay-bar right" id="rightBar">
                     <div class="tile" id="rightTile0" data-tile="Tile 0">
-                        <div class="tile-single" style="color: #00ffff;" id="connDisplay">Conn: 0</div>
+                        <div class="status-tile">
+                            <div class="battery-icon" id="batteryIcon">
+                                <div class="battery-fill green" id="batteryFill" style="width: 70%;"></div>
+                                <div class="battery-bolt" id="batteryBolt">
+                                    <svg viewBox="0 0 20 28" fill="none">
+                                        <path d="M12 0L4 16h5l-3 12 9-18h-5z" fill="#ffff00" stroke="#000" stroke-width="1"/>
+                                    </svg>
+                                </div>
+                            </div>
+                            <div class="connection-display" id="connDisplay">
+                                <div class="conn-row" style="color: #00ff00;" id="connWebrtc">WRT:0</div>
+                                <div class="conn-row" style="color: #ffff00;" id="connMjpeg">MJP:0</div>
+                            </div>
+                        </div>
                     </div>
                     <div class="tile" id="rightTile1" data-tile="Tile 1">
                         <!-- Empty -->
@@ -645,6 +750,19 @@
                     <input type="number" id="mockMjpeg" value="0" min="0" max="10" style="width: 80px;">
                 </div>
                 <button class="btn btn-primary" onclick="sendMockConnections()">Set Connections</button>
+
+                <h2 style="margin-top: 20px;">Mock Battery</h2>
+                <div class="control-group">
+                    <label>Battery percentage: <strong id="batterySliderValue">75</strong>%</label>
+                    <input type="range" id="mockBatteryPercent" value="75" min="0" max="100" step="1"
+                           oninput="document.getElementById('batterySliderValue').textContent = this.value; sendMockBattery()"
+                           style="width: 100%; accent-color: #00d4ff;">
+                </div>
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="mockBatteryCharging" onchange="sendMockBattery()"> Charging
+                    </label>
+                </div>
             </div>
 
             <div class="info-panel api-monitor">
@@ -715,10 +833,25 @@
                 status.textContent = 'Connections: Disconnected';
             }
 
-            // Update connection count
+            // Update status bar count
             const total = data.total || 0;
             document.getElementById('connCount').textContent = total;
-            document.getElementById('connDisplay').textContent = `Conn: ${total}`;
+
+            // Update right bar Tile 0 - matching OverlayRenderer layout
+            const connWebrtc = document.getElementById('connWebrtc');
+            const connMjpeg = document.getElementById('connMjpeg');
+
+            if (data.connected === false && !data.total && !data.webrtc && !data.mjpeg) {
+                // Disconnected/connecting state
+                connWebrtc.style.color = '#ffa500';
+                connWebrtc.textContent = 'Conn...';
+                connMjpeg.textContent = '';
+            } else {
+                // Connected state - show breakdown
+                connWebrtc.style.color = '#00ff00';
+                connWebrtc.textContent = `WRT:${data.webrtc || 0}`;
+                connMjpeg.textContent = `MJP:${data.mjpeg || 0}`;
+            }
         }
 
         function connectSSE() {
@@ -1069,6 +1202,75 @@
         // Initialize recording
         fetchRecordingStatus();
         connectRecordingSSE();
+
+        // === Battery ===
+        let batterySource = null;
+
+        function getBatteryColorClass(percent) {
+            if (percent > 50) return 'green';
+            if (percent > 20) return 'yellow';
+            return 'red';
+        }
+
+        function updateBatteryDisplay(data) {
+            const fill = document.getElementById('batteryFill');
+            const bolt = document.getElementById('batteryBolt');
+            const icon = document.getElementById('batteryIcon');
+
+            const percent = Math.max(0, Math.min(100, data.percent || 0));
+            const charging = data.charging || false;
+            const colorClass = getBatteryColorClass(percent);
+
+            // Update fill bar width
+            fill.style.width = percent + '%';
+            fill.className = 'battery-fill ' + colorClass;
+
+            // Update lightning bolt inside battery icon
+            bolt.className = charging ? 'battery-bolt visible' : 'battery-bolt';
+
+            // Battery icon border color when low
+            icon.style.borderColor = (percent <= 20) ? '#ff4444' : '#888';
+        }
+
+        function connectBatterySSE() {
+            if (batterySource) {
+                batterySource.close();
+            }
+
+            batterySource = new EventSource('/api/battery/stream');
+
+            batterySource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateBatteryDisplay(data);
+                } catch (e) {
+                    console.error('Battery SSE parse error:', e);
+                }
+            };
+
+            batterySource.onerror = function() {
+                console.log('Battery SSE error, reconnecting...');
+                setTimeout(connectBatterySSE, 3000);
+            };
+        }
+
+        function sendMockBattery() {
+            const percent = parseInt(document.getElementById('mockBatteryPercent').value);
+            const charging = document.getElementById('mockBatteryCharging').checked;
+
+            // Update display immediately (no SSE roundtrip delay)
+            updateBatteryDisplay({ percent, charging });
+
+            // Also sync to server
+            fetch('/api/battery/mock', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ percent, charging })
+            });
+        }
+
+        // Initialize battery SSE
+        connectBatterySSE();
 
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {

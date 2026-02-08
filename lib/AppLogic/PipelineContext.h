@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BatteryData.h"
 #include "ConnectionData.h"
 #include "DetectionData.h"
 #include "RecordingData.h"
@@ -80,6 +81,8 @@ public:
   const ConnectionData &connectionData() const { return connection_data_; }
   RecordingData &recordingData() { return recording_data_; }
   const RecordingData &recordingData() const { return recording_data_; }
+  BatteryData &batteryData() { return battery_data_; }
+  const BatteryData &batteryData() const { return battery_data_; }
 
 private:
   QueueHandle_t frame_queue_ = nullptr;
@@ -102,4 +105,5 @@ private:
   DetectionData detection_data_;
   ConnectionData connection_data_;
   RecordingData recording_data_;
+  BatteryData battery_data_;
 };
