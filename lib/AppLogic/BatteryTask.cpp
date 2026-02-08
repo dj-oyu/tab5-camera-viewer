@@ -23,7 +23,7 @@ namespace
   constexpr float CURRENT_LSB_MA = 0.3f;     // 0.0003 A = 0.3 mA per LSB
   constexpr float BUS_VOLTAGE_LSB_MV = 1.25f; // 0.00125 V = 1.25 mV per LSB
 
-  // --- LiPo voltage-to-percentage lookup ---
+  // --- 2S LiPo voltage-to-percentage lookup (Tab5 = 2-cell series) ---
   struct VoltagePoint
   {
     int mv;
@@ -31,11 +31,11 @@ namespace
   };
 
   constexpr VoltagePoint VOLTAGE_TABLE[] = {
-      {4200, 100},
-      {4060, 75},
-      {3860, 50},
-      {3700, 25},
-      {3500, 0},
+      {8400, 100},  // 4.20V × 2
+      {8120, 75},   // 4.06V × 2
+      {7720, 50},   // 3.86V × 2
+      {7400, 25},   // 3.70V × 2
+      {7000, 0},    // 3.50V × 2
   };
   constexpr int VOLTAGE_TABLE_SIZE =
       sizeof(VOLTAGE_TABLE) / sizeof(VOLTAGE_TABLE[0]);
@@ -119,10 +119,9 @@ namespace
 
         int percent = voltageToPercent(busVoltageMv);
 
-        // Charging detection: sign of current.
-        // NOTE: Sign convention depends on INA226 shunt orientation on Tab5.
-        // Verify on hardware — if reversed, flip this condition.
-        bool charging = (currentMa > 0);
+        // Charging detection: negative current = charging on Tab5
+        // (INA226 shunt orientation: positive = discharging)
+        bool charging = (currentMa < 0);
 
         data.update(percent, charging, currentMa, busVoltageMv);
       }
