@@ -46,5 +46,6 @@ constexpr uint32_t VIDEO_Y_OFFSET = 160;      // 映像の開始Y座標
 constexpr uint32_t VIDEO_HEIGHT = 960;        // 映像の高さ (480 * 1.5 * rotated)
 
 // Detection API configuration
-constexpr uint32_t DETECTION_TIMEOUT_MS = 30000;      // SSE streams need longer timeout
+constexpr uint32_t DETECTION_TIMEOUT_MS = 30000;      // HTTP connect/response timeout
 constexpr uint32_t DETECTION_RECONNECT_DELAY_MS = 3000;
+constexpr uint32_t DETECTION_SSE_IDLE_TIMEOUT_MS = 300000; // 5min: イベント駆動SSEの長時間アイドルは正常
