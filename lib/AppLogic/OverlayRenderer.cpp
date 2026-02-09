@@ -529,10 +529,10 @@ void OverlayRenderer::init()
   if (initialized)
     return;
 
-  // Create tile sprite in internal SRAM
+  // Create tile sprite in SPIRAM (overlay rendering is infrequent, ~40-150us)
   // Sprite: 160(W) x 240(H) with rotation 3
   // After rotation, drawing coordinates become 240(W) x 160(H)
-  tileSprite.setPsram(false);
+  tileSprite.setPsram(true);
   tileSprite.setColorDepth(16);
   if (!tileSprite.createSprite(TILE_HEIGHT, TILE_WIDTH))
   { // 240 x 160
@@ -542,7 +542,7 @@ void OverlayRenderer::init()
   tileSprite.setSwapBytes(false);
   tileSprite.setRotation(3); // 270° CCW - text appears correct in landscape
   tileSprite.setTextSize(2);
-  Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, internal SRAM)\n",
+  Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, SPIRAM)\n",
                 TILE_HEIGHT, TILE_WIDTH);
   tileBuffer = (uint16_t *)tileSprite.getBuffer();
 
@@ -685,16 +685,20 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     copyTileToBar(topBar, 0);
   }
 
+  if (battChanged)
+  {
+    renderDebugTile();
+    copyTileToBar(topBar, 1);
+  }
+
   if (recChanged)
   {
     renderRecordingTile();
     copyTileToBar(topBar, 2);
   }
 
-  if (statusChanged || recChanged)
+  if (statusChanged || battChanged || recChanged)
   {
-    renderDebugTile();
-    copyTileToBar(topBar, 1);
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     snapshot.conn_total = cachedConnectionTotal;
     snapshot.conn_webrtc = cachedConnectionWebrtc;

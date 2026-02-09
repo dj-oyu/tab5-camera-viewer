@@ -54,8 +54,6 @@ namespace
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto decoded_queue = ctx->decodedFrameQueue();
     auto render_free_queue = ctx->renderFreeQueue();
-    auto display_done = ctx->displayDoneSema();
-    auto ppa_done = ctx->ppaDoneSema();
     auto panel_handle = ctx->panelHandle();
 
     Serial.println("RenderTask: Starting...");
@@ -73,8 +71,8 @@ namespace
 
     Serial.println("RenderTask: Initialized");
 
-    // displayDoneSema is primed in PipelineContext::init().
-    // Drain that bootstrap token so subsequent takes correspond to actual submits.
+    auto display_done = ctx->displayDoneSema();
+    // Drain initial Give so first frame waits properly.
     xSemaphoreTake(display_done, 0);
 
     RenderPerfStats perf;
@@ -140,8 +138,7 @@ namespace
           }
 
           int64_t wait_start = esp_timer_get_time();
-          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) !=
-              pdTRUE)
+          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) != pdTRUE)
           {
             perf.display_timeouts++;
             break;
@@ -166,10 +163,10 @@ namespace
         int64_t ppa_start = esp_timer_get_time();
         bool ppa_ok = PPAPipeline::submit(
             ppa_config, ctx->decodeBufferBytes(dfd.buf_idx),
-            reinterpret_cast<uint8_t *>(videoBuffer), ppa_done);
+            reinterpret_cast<uint8_t *>(videoBuffer), ctx->renderTaskHandle());
 
         if (!ppa_ok ||
-            xSemaphoreTake(ppa_done, pdMS_TO_TICKS(120)) != pdTRUE)
+            !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
         {
           perf.ppa_timeouts++;
           ctx->releaseRenderBuffer(render_buf);
@@ -187,8 +184,7 @@ namespace
         if (inflight_buf)
         {
           int64_t wait_start = esp_timer_get_time();
-          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) !=
-              pdTRUE)
+          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) != pdTRUE)
           {
             perf.display_timeouts++;
             ctx->releaseRenderBuffer(render_buf);
@@ -245,6 +241,8 @@ namespace
 void RenderTask::start(PipelineContext &ctx, UBaseType_t priority,
                        BaseType_t core)
 {
-  xTaskCreatePinnedToCore(renderTask, "Render", STACK_DEPTH, &ctx, priority,
-                          nullptr, core);
+  TaskHandle_t handle = nullptr;
+  xTaskCreatePinnedToCore(renderTask, "Render", STACK_DEPTH_RENDER, &ctx, priority,
+                          &handle, core);
+  ctx.setRenderTaskHandle(handle);
 }

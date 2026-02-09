@@ -164,9 +164,10 @@ void detectionTask(void *pvParameters) {
           }
         }
       } else {
-        // Check for stream timeout (no data for 60 seconds)
-        if (millis() - lastActivity > 60000) {
-          Serial.println("DetectionTask: Stream idle timeout");
+        // Check for stream timeout (safety net for dead TCP connections)
+        uint32_t idle_s = (millis() - lastActivity) / 1000;
+        if (idle_s * 1000 >= DETECTION_SSE_IDLE_TIMEOUT_MS) {
+          Serial.printf("DetectionTask: SSE idle %us, reconnecting\n", idle_s);
           break;
         }
         vTaskDelay(pdMS_TO_TICKS(50));

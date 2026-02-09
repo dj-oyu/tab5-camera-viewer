@@ -739,6 +739,6 @@ namespace
 void FetchTask::start(PipelineContext &ctx, UBaseType_t priority,
                       BaseType_t core)
 {
-  xTaskCreatePinnedToCore(fetchTask, "Fetch", STACK_DEPTH, &ctx, priority,
+  xTaskCreatePinnedToCore(fetchTask, "Fetch", STACK_DEPTH_FETCH, &ctx, priority,
                           nullptr, core);
 }

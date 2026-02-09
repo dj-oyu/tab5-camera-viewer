@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <hal/ppa_types.h>
 #include <driver/ppa.h>
 
@@ -21,7 +21,7 @@ public:
 
   [[nodiscard]] static bool submit(ppa_srm_oper_config_t &config,
                                    const uint8_t *src, uint8_t *dst,
-                                   SemaphoreHandle_t done_sem);
+                                   TaskHandle_t notify_task);
 
   // Copy/Scale/Rotate image using PPA hardware
   [[nodiscard]] static bool transform(const uint8_t *src, uint8_t *dst,
@@ -31,7 +31,7 @@ public:
                        ppa_srm_color_mode_t dst_fmt,
                        ppa_srm_rotation_angle_t rotation,
                        float scale_x, float scale_y,
-                       SemaphoreHandle_t done_sem);
+                       TaskHandle_t notify_task);
 
   // Simple copy with centering (no rotation/scale)
   [[nodiscard]] static bool copy(const uint8_t *src, uint8_t *dst,
@@ -39,7 +39,7 @@ public:
                   uint32_t dst_w, uint32_t dst_h,
                   ppa_srm_color_mode_t src_fmt,
                   ppa_srm_color_mode_t dst_fmt,
-                  SemaphoreHandle_t done_sem);
+                  TaskHandle_t notify_task);
 
 private:
   static ppa_client_handle_t client;

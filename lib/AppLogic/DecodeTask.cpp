@@ -105,6 +105,6 @@ namespace
 void DecodeTask::start(PipelineContext &ctx, UBaseType_t priority,
                        BaseType_t core)
 {
-  xTaskCreatePinnedToCore(decodeTask, "Decode", STACK_DEPTH, &ctx, priority,
+  xTaskCreatePinnedToCore(decodeTask, "Decode", STACK_DEPTH_DECODE, &ctx, priority,
                           nullptr, core);
 }

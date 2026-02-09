@@ -61,24 +61,18 @@ uint32_t connectionIntervalMsForLevel(uint8_t level) {
 } // namespace
 
 bool PipelineContext::init() {
-  display_done_sema_ = xSemaphoreCreateBinary();
-  if (!display_done_sema_) {
-    Serial.println("Failed to create displayDoneSema");
-    return false;
-  }
-  xSemaphoreGive(display_done_sema_);
-
-  ppa_done_sema_ = xSemaphoreCreateBinary();
-  if (!ppa_done_sema_) {
-    Serial.println("Failed to create ppaDoneSema");
-    return false;
-  }
-
   perf_mutex_ = xSemaphoreCreateMutex();
   if (!perf_mutex_) {
     Serial.println("Failed to create perf mutex");
     return false;
   }
+
+  display_done_sema_ = xSemaphoreCreateBinary();
+  if (!display_done_sema_) {
+    Serial.println("Failed to create display done semaphore");
+    return false;
+  }
+  xSemaphoreGive(display_done_sema_);
 
   linear_free_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(uint8_t *));
   frame_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(FrameData));
