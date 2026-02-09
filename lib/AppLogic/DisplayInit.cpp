@@ -3,6 +3,7 @@
 #include "PipelineContext.h"
 #include <Arduino.h>
 #include <M5Unified.h>
+#include <freertos/semphr.h>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
 // Forward declaration for DPI panel event callbacks

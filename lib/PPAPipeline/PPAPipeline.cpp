@@ -8,11 +8,11 @@ ppa_client_handle_t PPAPipeline::client = nullptr;
 bool PPAPipeline::ppa_event_cb(ppa_client_handle_t ppa_client,
                                ppa_event_data_t *event_data, void *user_data)
 {
-  SemaphoreHandle_t sem = (SemaphoreHandle_t)user_data;
-  if (sem)
+  TaskHandle_t task = static_cast<TaskHandle_t>(user_data);
+  if (task)
   {
     BaseType_t task_woken = pdFALSE;
-    xSemaphoreGiveFromISR(sem, &task_woken);
+    vTaskNotifyGiveFromISR(task, &task_woken);
     return task_woken == pdTRUE;
   }
   return false;
@@ -107,7 +107,7 @@ void PPAPipeline::prepareConfig(ppa_srm_oper_config_t &config,
 }
 
 bool PPAPipeline::submit(ppa_srm_oper_config_t &config, const uint8_t *src,
-                         uint8_t *dst, SemaphoreHandle_t done_sem)
+                         uint8_t *dst, TaskHandle_t notify_task)
 {
   if (!client)
   {
@@ -117,7 +117,7 @@ bool PPAPipeline::submit(ppa_srm_oper_config_t &config, const uint8_t *src,
 
   config.in.buffer = src;
   config.out.buffer = dst;
-  config.user_data = reinterpret_cast<void *>(done_sem);
+  config.user_data = static_cast<void *>(notify_task);
 
   esp_err_t ret = ppa_do_scale_rotate_mirror(client, &config);
   if (ret != ESP_OK)
@@ -136,12 +136,12 @@ bool PPAPipeline::transform(const uint8_t *src, uint8_t *dst,
                             ppa_srm_color_mode_t dst_fmt,
                             ppa_srm_rotation_angle_t rotation,
                             float scale_x, float scale_y,
-                            SemaphoreHandle_t done_sem)
+                            TaskHandle_t notify_task)
 {
   ppa_srm_oper_config_t config = {};
   prepareConfig(config, src_w, src_h, dst_w, dst_h, src_fmt, dst_fmt, rotation,
                 scale_x, scale_y);
-  return submit(config, src, dst, done_sem);
+  return submit(config, src, dst, notify_task);
 }
 
 bool PPAPipeline::copy(const uint8_t *src, uint8_t *dst,
@@ -149,10 +149,10 @@ bool PPAPipeline::copy(const uint8_t *src, uint8_t *dst,
                        uint32_t dst_w, uint32_t dst_h,
                        ppa_srm_color_mode_t src_fmt,
                        ppa_srm_color_mode_t dst_fmt,
-                       SemaphoreHandle_t done_sem)
+                       TaskHandle_t notify_task)
 {
   return transform(src, dst, src_w, src_h, dst_w, dst_h,
                    src_fmt, dst_fmt,
                    PPA_SRM_ROTATION_ANGLE_0, 1.0f, 1.0f,
-                   done_sem);
+                   notify_task);
 }

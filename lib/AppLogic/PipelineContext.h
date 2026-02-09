@@ -14,6 +14,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 
 struct FrameData
 {
@@ -49,8 +50,9 @@ public:
   QueueHandle_t linearFreeQueue() const { return linear_free_queue_; }
   QueueHandle_t renderFreeQueue() const { return render_free_queue_; }
 
+  TaskHandle_t renderTaskHandle() const { return render_task_handle_; }
+  void setRenderTaskHandle(TaskHandle_t h) { render_task_handle_ = h; }
   SemaphoreHandle_t displayDoneSema() const { return display_done_sema_; }
-  SemaphoreHandle_t ppaDoneSema() const { return ppa_done_sema_; }
 
   esp_lcd_panel_handle_t panelHandle() const { return panel_handle_; }
   void setPanelHandle(esp_lcd_panel_handle_t handle) { panel_handle_ = handle; }
@@ -89,8 +91,8 @@ private:
   QueueHandle_t decoded_frame_queue_ = nullptr;
   QueueHandle_t linear_free_queue_ = nullptr;
   QueueHandle_t render_free_queue_ = nullptr;
+  TaskHandle_t render_task_handle_ = nullptr;
   SemaphoreHandle_t display_done_sema_ = nullptr;
-  SemaphoreHandle_t ppa_done_sema_ = nullptr;
   esp_lcd_panel_handle_t panel_handle_ = nullptr;
 
   uint16_t *decode_bufs_[2] = {nullptr, nullptr};
