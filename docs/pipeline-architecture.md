@@ -158,12 +158,16 @@ Linear Buffer Pool ───────────────┘
 | `linearFreeQueue`   | 3      | Render | Fetch  | Linear buffer再利用 |
 | `renderFreeQueue`   | 2      | Render | Render | 描画バッファ再利用  |
 
-### セマフォ (FreeRTOS Semaphore)
+### 同期プリミティブ
 
-| セマフォ名        | 種類   | 用途            |
-| ----------------- | ------ | --------------- |
-| `ppaDoneSema`     | Binary | PPA処理完了通知 |
-| `displayDoneSema` | Binary | DSI転送完了通知 |
+| 名前                | 種類              | 用途            |
+| ------------------- | ----------------- | --------------- |
+| PPA完了通知         | Task Notification | PPA処理完了通知 (index 0) |
+| `displayDoneSema`   | Binary Semaphore  | DSI転送完了通知 |
+
+> **Note**: PPA完了通知は `vTaskNotifyGiveFromISR` / `ulTaskNotifyTake` を使用。
+> pioarduino の `configTASK_NOTIFICATION_ARRAY_ENTRIES=1` 制約により、
+> indexed API は使用不可。Display完了はBinary Semaphoreを維持。
 
 ### 同期フロー
 
@@ -172,14 +176,14 @@ Render Task (Frame N):
     │
     ├─ renderFreeQueueから描画先バッファ取得
     │
-    ├─ PPAPipeline::transform() (非同期開始)
+    ├─ PPAPipeline::submit() (非同期開始、notify_task=renderTaskHandle)
     │
-    ├─ xSemaphoreTake(ppaDoneSema) ← PPA完了待ち
+    ├─ ulTaskNotifyTake(pdTRUE, 120ms) ← PPA完了待ち (Task Notification)
     │
     ├─ OverlayRenderer::render()
     │
     ├─ (in-flightバッファがある場合)
-    │   xSemaphoreTake(displayDoneSema) ← Frame N-1のDSI完了待ち
+    │   xSemaphoreTake(displayDoneSema, 120ms) ← Frame N-1のDSI完了待ち
     │
     ├─ esp_lcd_panel_draw_bitmap() (DSI転送開始、非同期)
     │
@@ -191,7 +195,7 @@ ISR (DSI Transfer Done):
 
 ISR (PPA Done):
     │
-    └─ xSemaphoreGiveFromISR(ppaDoneSema)
+    └─ vTaskNotifyGiveFromISR(renderTaskHandle) ← PPA完了通知
 ```
 
 ## Transfer-Encoding: Chunked対応
@@ -283,8 +287,8 @@ FPS = 1000ms / 16ms = 62.5 FPS
 | --------------------- | ------------ | ------------------------ |
 | frameQueue受信        | 1000ms       | vTaskDelay(1)            |
 | decodedFrameQueue受信 | 1000ms       | vTaskDelay(1)            |
-| displayDoneSema       | 500ms        | セマフォ返却してスキップ |
-| ppaDoneSema           | 無制限       | 待機                     |
+| displayDoneSema       | 120ms        | バッファ返却してスキップ |
+| PPA Task Notification | 120ms        | バッファ返却してスキップ |
 
 ### リソース枯渇
 
@@ -323,15 +327,15 @@ if (xQueueSend(frameQueue, &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 
 ### FreeRTOS
 
-- Stack (Fetch Task): 16KB
-- Stack (Decode Task): 16KB
-- Stack (Render Task): 16KB
-- Stack (Detection Task): 16KB
-- Stack (Connection Task): 16KB
+- Stack (Render Task): 10KB
+- Stack (Fetch Task): 12KB
+- Stack (Decode Task): 8KB
+- Stack (Detection Task): 8KB
+- Stack (Connection Task): 8KB
 - Queues: < 1KB
 - Semaphores: < 1KB
 
-**合計: ~82KB (RAM)**
+**合計: ~47KB (RAM)**
 
 ## ビルド設定
 
@@ -358,7 +362,7 @@ LINEAR_BUF_SIZE = 83558          // 82KB (max 66KB + 25% margin)
 LINEAR_BUF_COUNT = 3             // トリプルバッファ
 LINEAR_INTERNAL_CACHE_COUNT = 2  // 先頭2本を内部SRAM優先
 INTERNAL_CACHE_GUARD_BYTES = 131072 // 内部SRAM最低残量ガード
-DECODE_BUF_SIZE = max(STREAM, PANEL) * 2
+DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2  // 614,400 bytes
 FETCH_RX_BUF_SIZE = 32768
 FETCH_TCP_RCVBUF_BYTES = 65536
 FETCH_BLOCK_TIMEOUT_MS = 4
@@ -374,8 +378,10 @@ PERF_LOG_INTERVAL_MS = 2000
 FPS_THROTTLE_ON = 28.0
 FPS_THROTTLE_OFF = 29.5
 
-// タスク設定
-STACK_DEPTH = 16384
+// タスクスタック（個別最適化）
+STACK_DEPTH_RENDER = 10240
+STACK_DEPTH_FETCH  = 12288
+STACK_DEPTH_DECODE = 8192
 ```
 
 ## デバッグ

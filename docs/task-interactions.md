@@ -4,9 +4,9 @@
 
 | タスク名   | 関数名           | Priority | Core | Stack | 役割                           |
 | ---------- | ---------------- | -------- | ---- | ----- | ------------------------------ |
-| Render     | `renderTask`     | 6        | 1    | 16KB  | PPA変換 + Overlay + DSI submit |
-| Fetch      | `fetchTask`      | 5        | 1    | 16KB  | HTTP MJPEG取得/解析            |
-| Decode     | `decodeTask`     | 5        | 0    | 16KB  | JPEG HW Decode                 |
+| Render     | `renderTask`     | 6        | 1    | 10KB  | PPA変換 + Overlay + DSI submit |
+| Fetch      | `fetchTask`      | 5        | 1    | 12KB  | HTTP MJPEG取得/解析            |
+| Decode     | `decodeTask`     | 5        | 0    | 8KB   | JPEG HW Decode                 |
 | Detection  | `detectionTask`  | 4        | 1    | 8KB   | Detection API (SSE)            |
 | Connection | `connectionTask` | 4        | 1    | 8KB   | Connection API (SSE)           |
 | Recording  | `recordingTask`  | 1        | 1    | 8KB   | Recording API                  |
@@ -22,8 +22,8 @@ RenderをCore1で最優先にして、Fetchの連続パースで描画が飢餓�
 | `frameQueue`        | 3 (`FrameData`)        | Fetch   | Decode | JPEG圧縮フレーム       |
 | `decodedFrameQueue` | 2 (`DecodedFrameData`) | Decode  | Render | デコード済みフレーム   |
 | `renderFreeQueue`   | 2 (`uint16_t*`)        | Render  | Render | 描画バッファ再利用     |
-| `ppaDoneSema`       | Binary                 | PPA ISR | Render | PPA完了通知            |
-| `displayDoneSema`   | Binary                 | DSI ISR | Render | DSI転送完了通知        |
+| PPA Task Notification | Task Notification (index 0) | PPA ISR | Render | PPA完了通知     |
+| `displayDoneSema`   | Binary Semaphore       | DSI ISR | Render | DSI転送完了通知        |
 
 ## 1. Fetch → Decode (`frameQueue`)
 
@@ -107,7 +107,7 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 
 - `frameQueue`満杯時: Fetchでドロップして`linearFreeQueue`へ返却
 - `renderFreeQueue`枯渇時: Renderは`displayDoneSema`を待って再利用
-- `ppaDoneSema`/`displayDoneSema`待ちにタイムアウトを設け、周期ログで異常を検出
+- PPA Task Notification / `displayDoneSema`待ちにタイムアウト(120ms)を設け、周期ログで異常を検出
 
 ## 6. 計測ログ
 
