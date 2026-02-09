@@ -2,7 +2,9 @@
 
 #include <cstdint>
 
-constexpr int STACK_DEPTH = 16384;
+constexpr int STACK_DEPTH_RENDER = 10240;
+constexpr int STACK_DEPTH_FETCH  = 12288;
+constexpr int STACK_DEPTH_DECODE = 8192;
 constexpr int BITSTREAM_PAD = 64;
 
 constexpr uint32_t STREAM_WIDTH = 640;
@@ -11,11 +13,7 @@ constexpr uint32_t STREAM_HEIGHT = 480;
 constexpr uint32_t PANEL_WIDTH = 720;
 constexpr uint32_t PANEL_HEIGHT = 1280;
 
-constexpr uint32_t DECODE_BUF_SIZE =
-    ((STREAM_WIDTH * STREAM_HEIGHT) > (PANEL_WIDTH * PANEL_HEIGHT)
-         ? (STREAM_WIDTH * STREAM_HEIGHT)
-         : (PANEL_WIDTH * PANEL_HEIGHT)) *
-    2;
+constexpr uint32_t DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2; // RGB565 at stream resolution
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
 constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ

@@ -529,10 +529,10 @@ void OverlayRenderer::init()
   if (initialized)
     return;
 
-  // Create tile sprite in internal SRAM
+  // Create tile sprite in SPIRAM (overlay rendering is infrequent, ~40-150us)
   // Sprite: 160(W) x 240(H) with rotation 3
   // After rotation, drawing coordinates become 240(W) x 160(H)
-  tileSprite.setPsram(false);
+  tileSprite.setPsram(true);
   tileSprite.setColorDepth(16);
   if (!tileSprite.createSprite(TILE_HEIGHT, TILE_WIDTH))
   { // 240 x 160
@@ -542,7 +542,7 @@ void OverlayRenderer::init()
   tileSprite.setSwapBytes(false);
   tileSprite.setRotation(3); // 270° CCW - text appears correct in landscape
   tileSprite.setTextSize(2);
-  Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, internal SRAM)\n",
+  Serial.printf("OverlayRenderer: tileSprite OK (%dx%d, rot=3, SPIRAM)\n",
                 TILE_HEIGHT, TILE_WIDTH);
   tileBuffer = (uint16_t *)tileSprite.getBuffer();
 

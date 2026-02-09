@@ -242,7 +242,7 @@ void RenderTask::start(PipelineContext &ctx, UBaseType_t priority,
                        BaseType_t core)
 {
   TaskHandle_t handle = nullptr;
-  xTaskCreatePinnedToCore(renderTask, "Render", STACK_DEPTH, &ctx, priority,
+  xTaskCreatePinnedToCore(renderTask, "Render", STACK_DEPTH_RENDER, &ctx, priority,
                           &handle, core);
   ctx.setRenderTaskHandle(handle);
 }
