@@ -685,16 +685,20 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     copyTileToBar(topBar, 0);
   }
 
+  if (battChanged)
+  {
+    renderDebugTile();
+    copyTileToBar(topBar, 1);
+  }
+
   if (recChanged)
   {
     renderRecordingTile();
     copyTileToBar(topBar, 2);
   }
 
-  if (statusChanged || recChanged)
+  if (statusChanged || battChanged || recChanged)
   {
-    renderDebugTile();
-    copyTileToBar(topBar, 1);
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     snapshot.conn_total = cachedConnectionTotal;
     snapshot.conn_webrtc = cachedConnectionWebrtc;
