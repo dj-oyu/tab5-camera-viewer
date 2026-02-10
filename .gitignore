@@ -3,10 +3,14 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+build/
 *.idx
 *.env*
 sample/tab5-userdemo
 .claude/settings.local.json
+
+# garbage files
+nul
 
 # ESP-IDF build artifacts
 .dummy/

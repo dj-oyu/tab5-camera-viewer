@@ -97,6 +97,7 @@ namespace
     int wifi_rssi = 0;
     bool vpn_connected = false;
     uint8_t peer_count = 0;
+    int render_fps_x10 = -1;  // FPS × 10 for change detection
   };
 
   OverlayBufferSnapshot overlay_snapshot;  // 単一パネルFB用
@@ -116,6 +117,7 @@ namespace
   bool cachedVpnConnected = false;
   char cachedVpnIp[16] = "";
   uint8_t cachedPeerCount = 0;
+  float cachedRenderFps = -1.0f;
 
   // Recording state cache
   RecordingState cachedRecordingState = RecordingState::Idle;
@@ -374,10 +376,18 @@ namespace
       tileSprite.print("--");
     }
 
-    // Row 3: Peer count
+    // Row 3: Render FPS
     tileSprite.setCursor(4, TILE_PADDING + (ROW_HEIGHT + ROW_GAP) * 3);
-    tileSprite.setTextColor(TEXT_COLOR);
-    tileSprite.printf("Peers:%d", cachedPeerCount);
+    if (cachedRenderFps >= 0.0f) {
+      uint16_t fpsColor = (cachedRenderFps >= FPS_THROTTLE_OFF) ? OK_GREEN
+                         : (cachedRenderFps >= FPS_THROTTLE_ON)  ? WARN_YELLOW
+                                                                  : ERROR_COLOR;
+      tileSprite.setTextColor(fpsColor);
+      tileSprite.printf("%.1ffps", cachedRenderFps);
+    } else {
+      tileSprite.setTextColor(DARK_GREY);
+      tileSprite.print("--fps");
+    }
   }
 
   // Render recording tile (Right bar, Tile 2) - Button design
@@ -558,7 +568,7 @@ void OverlayRenderer::init()
 
 void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &connectionData,
                              RecordingData &recordingData, BatteryData &batteryData,
-                             uint16_t *framebuffer)
+                             uint16_t *framebuffer, float render_fps)
 {
   if (!initialized || framebuffer == nullptr)
     return;
@@ -653,6 +663,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
   cachedVpnIp[0] = '\0';
   cachedPeerCount = 0;
 #endif
+  cachedRenderFps = render_fps;
 
   // Read recording data
   RecordingState recState = recordingData.getState();
@@ -683,9 +694,11 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
                       cachedConnectionMjpeg != snapshot.conn_mjpeg ||
                       cachedConnectionState != snapshot.conn_state ||
                       cachedConnectionHttpCode != snapshot.conn_http_code);
+  int currentFpsX10 = (cachedRenderFps >= 0.0f) ? static_cast<int>(cachedRenderFps * 10.0f) : -1;
   bool netChanged = (cachedWifiRssi != snapshot.wifi_rssi ||
                      cachedVpnConnected != snapshot.vpn_connected ||
-                     cachedPeerCount != snapshot.peer_count);
+                     cachedPeerCount != snapshot.peer_count ||
+                     currentFpsX10 != snapshot.render_fps_x10);
   bool statusChanged = connChanged || netChanged;
 
   const int recDurationSec = static_cast<int>(recDuration);
@@ -725,6 +738,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     snapshot.wifi_rssi = cachedWifiRssi;
     snapshot.vpn_connected = cachedVpnConnected;
     snapshot.peer_count = cachedPeerCount;
+    snapshot.render_fps_x10 = currentFpsX10;
     snapshot.rec_state = recState;
     snapshot.rec_duration_sec = recDurationSec;
     snapshot.rec_blink = recordingBlinkOn;

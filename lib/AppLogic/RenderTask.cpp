@@ -47,7 +47,6 @@ namespace
   void renderTask(void *pvParameters)
   {
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
-    auto decoded_queue = ctx->decodedFrameQueue();
     auto dma2d_gate = ctx->dma2dGate();
     auto *panel_fb = ctx->panelFramebuffer();
 
@@ -86,11 +85,10 @@ namespace
 
     RenderPerfStats perf;
     uint32_t perf_window_start = millis();
+    float current_render_fps = -1.0f;  // For overlay display
 
     // PPA writes to video area of panel framebuffer directly
     uint16_t *videoBuffer = panel_fb + VIDEO_Y_OFFSET * PANEL_WIDTH;
-
-    DecodedFrameData dfd;
 
     auto flushRenderPerf = [&](uint32_t now)
     {
@@ -101,6 +99,7 @@ namespace
       }
       uint64_t frame_div = perf.frames > 0 ? perf.frames : 1;
       float window_fps = (1000.0f * perf.frames) / window_ms;
+      current_render_fps = window_fps;
       ctx->updateRenderFps(window_fps, now);
       if (VERBOSE_PERF_LOG)
       {
@@ -112,7 +111,7 @@ namespace
             static_cast<unsigned long long>(perf.ppa_us / frame_div),
             static_cast<unsigned long long>(perf.overlay_us / frame_div),
             perf.ppa_timeouts,
-            uxQueueMessagesWaiting(decoded_queue));
+            ctx->decodedFramesPending());
       }
       perf = {};
       perf_window_start = now;
@@ -120,21 +119,22 @@ namespace
 
     while (1)
     {
-      if (xQueueReceive(decoded_queue, &dfd, pdMS_TO_TICKS(1000)) ==
-          pdTRUE)
+      uint8_t *decoded_buf = ctx->waitDecodedFrame(pdMS_TO_TICKS(1000));
+      if (decoded_buf)
       {
-        // PPA: decode_buf[dfd.buf_idx] → panel FB video area (DMA2D)
+        // PPA: decoded_buf → panel FB video area (DMA2D)
         int64_t ppa_start = esp_timer_get_time();
 
         xSemaphoreTake(dma2d_gate, portMAX_DELAY);
 
         bool ppa_ok = PPAPipeline::submit(
-            ppa_config, ctx->decodeBufferBytes(dfd.buf_idx),
+            ppa_config, decoded_buf,
             reinterpret_cast<uint8_t *>(videoBuffer), self);
 
         if (!ppa_ok || !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
         {
           xSemaphoreGive(dma2d_gate);
+          ctx->releaseDecodedFrame();
           perf.ppa_timeouts++;
 
           uint32_t now = millis();
@@ -148,6 +148,9 @@ namespace
 
         xSemaphoreGive(dma2d_gate);
 
+        // Release decode buffer after PPA completes (DMA2D reads asynchronously)
+        ctx->releaseDecodedFrame();
+
         perf.ppa_us +=
             static_cast<uint64_t>(esp_timer_get_time() - ppa_start);
 
@@ -155,13 +158,9 @@ namespace
         int64_t overlay_start = esp_timer_get_time();
         OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
                                 ctx->recordingData(), ctx->batteryData(),
-                                panel_fb);
+                                panel_fb, current_render_fps);
         perf.overlay_us +=
             static_cast<uint64_t>(esp_timer_get_time() - overlay_start);
-
-        // No draw_bitmap needed: PPA wrote via DMA2D (bypasses cache),
-        // overlay flushed bars via esp_cache_msync.
-        // Display DMA reads panel FB from PSRAM directly.
 
         perf.frames++;
 
@@ -174,6 +173,12 @@ namespace
       }
       else
       {
+        // No decoded frame available — still render overlay so status
+        // (battery, WiFi, VPN) is visible during startup / network wait
+        OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
+                                ctx->recordingData(), ctx->batteryData(),
+                                panel_fb, current_render_fps);
+
         uint32_t now = millis();
         if ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
         {

@@ -19,6 +19,6 @@ void init();
 // Render both overlay bars
 void render(DetectionData &detectionData, ConnectionData &connectionData,
             RecordingData &recordingData, BatteryData &batteryData,
-            uint16_t *framebuffer);
+            uint16_t *framebuffer, float render_fps = -1.0f);
 
 } // namespace OverlayRenderer
