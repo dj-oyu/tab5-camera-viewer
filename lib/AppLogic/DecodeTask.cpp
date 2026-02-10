@@ -26,7 +26,6 @@ namespace
   {
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto frame_queue = ctx->frameQueue();
-    auto decoded_queue = ctx->decodedFrameQueue();
     auto dma2d_gate = ctx->dma2dGate();
 
     // Suppress noisy ESP-IDF JPEG decoder internal errors
@@ -78,7 +77,14 @@ namespace
           continue;
         }
 
-        int current_idx = ctx->nextDecodeIndex();
+        // Acquire decode buffer slot (blocks until RenderTask releases one)
+        uint8_t *decode_buf = ctx->acquireDecodeBuf();
+        if (!decode_buf)
+        {
+          if (fd.is_linear) { ctx->releaseLinear(fd.buf); }
+          continue;
+        }
+
         uint32_t out_size = 0;
         size_t process_len = fd.aligned_len;
 
@@ -88,7 +94,7 @@ namespace
         int64_t decode_start = esp_timer_get_time();
         esp_err_t ret = jpeg_decoder_process(
             decoder, &dec_cfg, fd.buf, process_len,
-            ctx->decodeBufferBytes(current_idx), DECODE_BUF_SIZE, &out_size);
+            decode_buf, DECODE_BUF_SIZE, &out_size);
         perf_decode_us +=
             static_cast<uint64_t>(esp_timer_get_time() - decode_start);
 
@@ -100,19 +106,18 @@ namespace
         if (ret != ESP_OK || out_size == 0)
         {
           perf_errors++;
+          ctx->discardDecodeBuf();
           if (perf_errors <= 3)
           {
-            Serial.printf("Decode: jpeg failed err=%d(%s) out=%u len=%u aligned=%u buf=%d\n",
+            Serial.printf("Decode: jpeg failed err=%d(%s) out=%u len=%u aligned=%u\n",
                           static_cast<int>(ret), esp_err_to_name(ret),
                           out_size, static_cast<uint32_t>(fd.len),
-                          static_cast<uint32_t>(process_len), current_idx);
+                          static_cast<uint32_t>(process_len));
           }
         }
         else
         {
-          // Queue decoded frame for RenderTask (PPA)
-          DecodedFrameData dfd = {.buf_idx = current_idx};
-          xQueueSend(decoded_queue, &dfd, portMAX_DELAY);
+          ctx->commitDecodedFrame();
           perf_frames++;
         }
 
@@ -134,7 +139,7 @@ namespace
               static_cast<unsigned long long>(perf_decode_us / perf_frames),
               perf_errors, perf_truncated,
               uxQueueMessagesWaiting(frame_queue),
-              uxQueueMessagesWaiting(decoded_queue));
+              ctx->decodedFramesPending());
           perf_frames = 0;
           perf_received = 0;
           perf_errors = 0;
@@ -150,7 +155,7 @@ namespace
               "queues(in=%u out=%u)\n",
               perf_received, perf_errors, perf_truncated,
               uxQueueMessagesWaiting(frame_queue),
-              uxQueueMessagesWaiting(decoded_queue));
+              ctx->decodedFramesPending());
           perf_received = 0;
           perf_errors = 0;
           perf_truncated = 0;
@@ -162,7 +167,7 @@ namespace
           Serial.printf(
               "Decode IDLE: queues(in=%u out=%u)\n",
               uxQueueMessagesWaiting(frame_queue),
-              uxQueueMessagesWaiting(decoded_queue));
+              ctx->decodedFramesPending());
           perf_window_start = now;
         }
       }
@@ -176,7 +181,7 @@ namespace
               "Decode IDLE: recv=%u ok=%u err=%u trunc=%u queues(in=%u out=%u)\n",
               perf_received, perf_frames, perf_errors, perf_truncated,
               uxQueueMessagesWaiting(frame_queue),
-              uxQueueMessagesWaiting(decoded_queue));
+              ctx->decodedFramesPending());
           perf_received = 0;
           perf_frames = 0;
           perf_errors = 0;

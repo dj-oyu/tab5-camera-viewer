@@ -36,7 +36,7 @@ constexpr bool VERIFY_FETCH_ONLY_MODE = false; // Step-1 validation: disable sid
 constexpr bool VERIFY_WIFI_DIAG_LOG = false;   // Step-3 validation: dump WiFi driver diag
 
 // Performance logging / control
-constexpr bool VERBOSE_PERF_LOG = true;         // Render/Fetch FPS periodic logs
+constexpr bool VERBOSE_PERF_LOG = false;         // Render/Fetch FPS periodic logs
 constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
 constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
 constexpr float FPS_THROTTLE_ON = 24.0f;

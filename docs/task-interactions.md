@@ -20,14 +20,14 @@ TailscaleTaskはCore0でDecodeTask(P5)の下、MicroLink内部coordination poll(
 
 ## キュー/セマフォ
 
-| 名前                | サイズ/型              | 送信元  | 受信先 | 用途                   |
-| ------------------- | ---------------------- | ------- | ------ | ---------------------- |
-| `linearFreeQueue`   | 3 (`uint8_t*`)         | Render  | Fetch  | JPEG入力バッファ再利用 |
-| `frameQueue`        | 3 (`FrameData`)        | Fetch   | Decode | JPEG圧縮フレーム       |
-| `decodedFrameQueue` | 2 (`DecodedFrameData`) | Decode  | Render | デコード済みフレーム   |
-| `renderFreeQueue`   | 2 (`uint16_t*`)        | Render  | Render | 描画バッファ再利用     |
-| PPA Task Notification | Task Notification (index 0) | PPA ISR | Render | PPA完了通知     |
-| `displayDoneSema`   | Binary Semaphore       | DSI ISR | Render | DSI転送完了通知        |
+| 名前                   | サイズ/型               | 送信元  | 受信先 | 用途                   |
+| ---------------------- | ----------------------- | ------- | ------ | ---------------------- |
+| `linearFreeQueue`      | 2 (`uint8_t*`)          | Decode  | Fetch  | JPEG入力バッファ再利用 |
+| `frameQueue`           | 2 (`FrameData`)         | Fetch   | Decode | JPEG圧縮フレーム       |
+| `decode_slot_sema_`    | Counting Semaphore(2)   | Render  | Decode | デコードバッファ空きslot |
+| `decoded_frame_sema_`  | Counting Semaphore(2)   | Decode  | Render | デコード済みフレーム通知 |
+| `dma2d_gate_`          | Counting Semaphore(2)   | —       | Decode/Render | JPEG+PPA DMA2D並列制御 |
+| PPA Task Notification  | Task Notification (index 0) | PPA ISR | Render | PPA完了通知     |
 
 ## 1. Fetch → Decode (`frameQueue`)
 
@@ -53,37 +53,41 @@ if (xQueueSend(ctx.frameQueue(), &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 - HTTP接続直後の初回のみ `WiFiClient::read` で受信をbootstrapし、その後は
   `stream.fd()` から `recv(MSG_DONTWAIT)` 直読みへ切り替える。
 
-## 2. Decode → Render (`decodedFrameQueue`)
+## 2. Decode → Render (セマフォベースダブルバッファ)
 
 ```cpp
-esp_err_t ret = jpeg_decoder_process(...);
-if (ret != ESP_OK || out_size == 0) {
-  ctx->releaseLinear(fd.buf);
-  continue;
-}
-DecodedFrameData dfd{.buf_idx = idx, .linear_buf = fd.buf, .has_linear_buf = true};
-xQueueSend(ctx->decodedFrameQueue(), &dfd, portMAX_DELAY);
+// DecodeTask:
+uint8_t *buf = ctx->acquireDecodeBuf();  // decode_slot_sema_ 取得 (slot確保)
+// ... JPEG HW decode into buf ...
+ctx->commitDecodedFrame();               // decoded_frame_sema_ 通知
+// (失敗時は ctx->discardDecodeBuf() でslot返却)
+
+// RenderTask:
+uint8_t *buf = ctx->waitDecodedFrame(timeout);  // decoded_frame_sema_ 取得
+// ... PPA from buf → Panel FB ...
+ctx->releaseDecodedFrame();              // decode_slot_sema_ 返却
 ```
 
-- 旧実装の不要な`esp_cache_msync`を削減し、decodeステージの固定コストを低減。
-- キュー長をdecodeバッファ数(2)と一致させて上書きリスクを回避。
+- デコード前にslotを確保するため、RenderTask が読取中のバッファを上書きするレースを防止。
+- Linear buffer の解放は DecodeTask がデコード完了直後に実行（FetchTask が即座に再利用可能）。
 
-## 3. Render内部 (`renderFreeQueue` + `displayDoneSema`)
+## 3. Render内部 (PPA→Panel FB直接書込み)
 
-Renderはダブルバッファで以下を実行する。
+Renderは単一のPanel Framebufferに直接書込む。render_buf 不要。
 
-1. `renderFreeQueue`から描画先を取得
-2. `PPA transform`実行
-3. `OverlayRenderer::render(..., render_buf)`
-4. 直前のin-flightバッファがある場合のみ`displayDoneSema`待機
-5. `esp_lcd_panel_draw_bitmap(..., render_buf)`でsubmit
+1. `waitDecodedFrame()` でデコード済みバッファを取得
+2. `dma2d_gate_` 取得 → PPA DMA2D で decode_buf → Panel FB video領域にスケーリング+回転
+3. PPA完了待ち (Task Notification, 120ms timeout)
+4. `dma2d_gate_` 解放 → `releaseDecodedFrame()` でデコードバッファ返却
+5. `OverlayRenderer::render()` で Panel FB の bar 領域 (top/bottom) を更新
+6. `draw_bitmap` 不要: DSI DMA が Panel FB を PSRAM から直接読取
 
 ```text
-Frame N:   PPA/Overlay on Buffer B   || DSI transfer of Buffer A
-Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
+PPA DMA2D:   decode_buf[0/1] → Panel FB video area (960×720)
+Overlay CPU: LGFX_Sprite → memcpy → Panel FB bar areas (top 160px, bottom 160px)
+             → esp_cache_msync() でPSRAMキャッシュフラッシュ
+DSI DMA:     Panel FB → Display (常時読取、60Hz refresh)
 ```
-
-これにより、PPAとDSIのオーバーラップが可能になり、1フレームあたりの直列待ち時間を短縮する。
 
 ## 4. Overlayのバッファ整合性
 
@@ -125,8 +129,8 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 ## 6. バックプレッシャーとドロップ戦略
 
 - `frameQueue`満杯時: Fetchでドロップして`linearFreeQueue`へ返却
-- `renderFreeQueue`枯渇時: Renderは`displayDoneSema`を待って再利用
-- PPA Task Notification / `displayDoneSema`待ちにタイムアウト(120ms)を設け、周期ログで異常を検出
+- `decode_slot_sema_`枯渇時: DecodeTaskは`acquireDecodeBuf()`でブロック (RenderTaskが解放するまで待機)
+- PPA Task Notification待ちにタイムアウト(120ms)を設け、周期ログで異常を検出
 
 ## 7. 計測ログ
 

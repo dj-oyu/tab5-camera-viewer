@@ -48,10 +48,10 @@
 
 ## 実機テスト（手動確認）
 
-- [ ] デバッグ Tile で電圧/電流の生値が妥当か確認
-- [ ] 充電中の電流符号を確認（正=充電 or 負=充電、必要なら `BatteryTask.cpp` の条件を反転）
+- [x] デバッグ Tile で電圧/電流の生値が妥当か確認
+- [x] 充電中の電流符号を確認（正=充電 or 負=充電、必要なら `BatteryTask.cpp` の条件を反転）
 - [ ] 充電中の電圧上昇による%ズレを確認、必要なら充電時補正を追加
-- [ ] USB ホットプラグ耐性テスト
+- [x] USB ホットプラグ耐性テスト
   - M5Unified の In_I2C 経由でもハングするか確認
   - ハングする場合: ポーリング間隔を長くする / I2C読み取りをタイムアウト保護
 
@@ -187,20 +187,17 @@ TCP_WND=16384 テスト時に以下の設定が反映されなかった:
   - JPEG(Core0) と PPA(Core1) が DMA2D 上で並列動作
 - [x] DecodeTask perf logging 改善（error/truncated パスでもログ出力）
 
+## 完了済み (decodedFrameQueue 簡素化)
+
+- [x] `decodedFrameQueue` (FreeRTOS Queue) をカウンティングセマフォベースの API に置換
+  - `DecodedFrameData` 構造体削除、`nextDecodeIndex()` 削除
+  - 新 API: `acquireDecodeBuf()` / `commitDecodedFrame()` / `discardDecodeBuf()`
+  - 新 API: `waitDecodedFrame()` / `releaseDecodedFrame()` / `decodedFramesPending()`
+  - デコード前に slot 確保 → バッファ上書きレースコンディション解消
+- [x] `docs/pipeline-architecture.md`, `docs/task-interactions.md` を現状コードに同期
+  - render_buf 廃止・PPA直接FB書込み・セマフォベース API を反映
+
 ## 次のタスク
-
-### decodedFrameQueue 簡素化の検討
-
-`ctx->decodeBufferBytes(dfd.buf_idx)` を `ctx->getDecodedBuf()` のようなAPIに置き換え、
-`decodedFrameQueue` (buf_idx を運ぶ Queue) を削除できるか検討。
-
-**現状**: DecodeTask → `decodedFrameQueue(DecodedFrameData{buf_idx})` → RenderTask
-**候補**: ダブルバッファの swap を atomic/セマフォで管理し、Queue を不要にする
-
-考慮点:
-- `DECODE_BUF_COUNT=2` でダブルバッファ: DecodeTask が書込み中の buf と RenderTask が読取中の buf
-- Queue 深度=2 がバックプレッシャー制御を兼ねている → 代替メカニズムが必要
-- Queue 削除による内部 SRAM 節約量は微小 (~100B)、主にコード簡素化が目的
 
 ### 内部 SRAM メモリ最適化
 
@@ -218,8 +215,10 @@ render_buf 廃止で ~3.5MB SPIRAM が空いた。内部 SRAM も最適化して
 
 ## クリーンアップ（動作確認後）
 
-- [ ] デバッグ用 Tile 1 (renderDebugTile) を削除
-- [ ] 充電検出が安定したら稲妻マーク表示を有効化
+- [x] 充電検出が安定したら稲妻マーク表示を有効化 → 既に有効（INA226電流符号で判定）
+- [ ] デバッグ用 Tile 1 (renderDebugTile) の用途決定
+  - 現在は WiFi RSSI + VPN 状態表示に転用済み（Tailscale ブランチ）
+  - Tailscale 不要時は削除 or 別の情報に差替え
 - [ ] バッテリーアイコンの表示微調整
 - [ ] LiPo電圧カーブの微調整（実測データに基づく）
 

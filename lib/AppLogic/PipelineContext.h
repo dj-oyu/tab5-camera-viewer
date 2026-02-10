@@ -24,11 +24,6 @@ struct FrameData
   bool is_linear;
 };
 
-struct DecodedFrameData
-{
-  int buf_idx;
-};
-
 struct SideLoadProfile
 {
   float render_fps = 0.0f;
@@ -44,7 +39,6 @@ public:
   [[nodiscard]] bool init();
 
   QueueHandle_t frameQueue() const { return frame_queue_; }
-  QueueHandle_t decodedFrameQueue() const { return decoded_frame_queue_; }
   QueueHandle_t linearFreeQueue() const { return linear_free_queue_; }
 
   TaskHandle_t renderTaskHandle() const { return render_task_handle_; }
@@ -57,12 +51,13 @@ public:
   uint16_t *panelFramebuffer() const { return panel_fb_; }
   void setPanelFramebuffer(uint16_t *fb) { panel_fb_ = fb; }
 
-  uint16_t *decodeBuffer(int idx) { return decode_bufs_[idx]; }
-  uint8_t *decodeBufferBytes(int idx)
-  {
-    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
-  }
-  int nextDecodeIndex();
+  // Decoded frame double-buffer API (replaces decodedFrameQueue)
+  uint8_t *acquireDecodeBuf(TickType_t timeout = portMAX_DELAY);
+  void commitDecodedFrame();
+  void discardDecodeBuf();
+  uint8_t *waitDecodedFrame(TickType_t timeout);
+  void releaseDecodedFrame();
+  int decodedFramesPending() const;
 
   [[nodiscard]] bool acquireLinear(uint8_t *&out_buf);
   void releaseLinear(uint8_t *buf);
@@ -80,15 +75,22 @@ public:
 
 private:
   QueueHandle_t frame_queue_ = nullptr;
-  QueueHandle_t decoded_frame_queue_ = nullptr;
   QueueHandle_t linear_free_queue_ = nullptr;
   TaskHandle_t render_task_handle_ = nullptr;
   SemaphoreHandle_t dma2d_gate_ = nullptr;
   esp_lcd_panel_handle_t panel_handle_ = nullptr;
   uint16_t *panel_fb_ = nullptr;
 
+  uint8_t *decodeBufferBytes(int idx)
+  {
+    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
+  }
+
   uint16_t *decode_bufs_[DECODE_BUF_COUNT] = {};
-  int decode_idx_ = 0;
+  SemaphoreHandle_t decode_slot_sema_ = nullptr;
+  SemaphoreHandle_t decoded_frame_sema_ = nullptr;
+  int decode_write_idx_ = 0;
+  int decode_read_idx_ = 0;
 
   uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
   SemaphoreHandle_t perf_mutex_ = nullptr;

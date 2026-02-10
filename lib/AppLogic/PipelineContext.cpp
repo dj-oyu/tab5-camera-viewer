@@ -76,9 +76,15 @@ bool PipelineContext::init() {
 
   linear_free_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(uint8_t *));
   frame_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(FrameData));
-  decoded_frame_queue_ = xQueueCreate(DECODE_BUF_COUNT, sizeof(DecodedFrameData));
-  if (!linear_free_queue_ || !frame_queue_ || !decoded_frame_queue_) {
+  if (!linear_free_queue_ || !frame_queue_) {
     Serial.println("Failed to create queues");
+    return false;
+  }
+
+  decode_slot_sema_ = xSemaphoreCreateCounting(DECODE_BUF_COUNT, DECODE_BUF_COUNT);
+  decoded_frame_sema_ = xSemaphoreCreateCounting(DECODE_BUF_COUNT, 0);
+  if (!decode_slot_sema_ || !decoded_frame_sema_) {
+    Serial.println("Failed to create decode semaphores");
     return false;
   }
 
@@ -142,10 +148,36 @@ void PipelineContext::releaseLinear(uint8_t *buf) {
   xQueueSend(linear_free_queue_, &buf, 0);
 }
 
-int PipelineContext::nextDecodeIndex() {
-  int idx = decode_idx_;
-  decode_idx_ ^= 1;
-  return idx;
+uint8_t *PipelineContext::acquireDecodeBuf(TickType_t timeout) {
+  if (xSemaphoreTake(decode_slot_sema_, timeout) != pdTRUE) {
+    return nullptr;
+  }
+  return decodeBufferBytes(decode_write_idx_);
+}
+
+void PipelineContext::commitDecodedFrame() {
+  decode_write_idx_ ^= 1;
+  xSemaphoreGive(decoded_frame_sema_);
+}
+
+void PipelineContext::discardDecodeBuf() {
+  xSemaphoreGive(decode_slot_sema_);
+}
+
+uint8_t *PipelineContext::waitDecodedFrame(TickType_t timeout) {
+  if (xSemaphoreTake(decoded_frame_sema_, timeout) != pdTRUE) {
+    return nullptr;
+  }
+  return decodeBufferBytes(decode_read_idx_);
+}
+
+void PipelineContext::releaseDecodedFrame() {
+  decode_read_idx_ ^= 1;
+  xSemaphoreGive(decode_slot_sema_);
+}
+
+int PipelineContext::decodedFramesPending() const {
+  return static_cast<int>(uxSemaphoreGetCount(decoded_frame_sema_));
 }
 
 void PipelineContext::updateRenderFps(float fps, uint32_t now_ms) {
