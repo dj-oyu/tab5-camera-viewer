@@ -10,8 +10,12 @@
 | Detection  | `detectionTask`  | 4        | 1    | 8KB   | Detection API (SSE)            |
 | Connection | `connectionTask` | 4        | 1    | 8KB   | Connection API (SSE)           |
 | Recording  | `recordingTask`  | 1        | 1    | 8KB   | Recording API                  |
+| Battery    | `batteryTask`    | 1        | 1    | 4KB   | Battery monitor (M5.Power)     |
+| Tailscale  | `tailscaleTask`  | 3        | 0    | 16KB  | Tailscale VPN (MicroLink)      |
+| *ML Coord* | *(内部タスク)*   | 2        | 1    | 8KB   | MicroLink coordination poll    |
 
 RenderをCore1で最優先にして、Fetchの連続パースで描画が飢餓状態になるのを防ぐ。
+TailscaleTaskはCore0でDecodeTask(P5)の下、MicroLink内部coordination poll(P2)はCore1で全パイプラインタスクの下。
 `VERIFY_FETCH_ONLY_MODE=true` の間は Detection/Connection/Recording を起動しない。
 
 ## キュー/セマフォ
@@ -103,13 +107,28 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 - PPAは動画領域(960x720)を毎フレーム更新する一方、Overlayは左右バーのみを任意タイミングで更新する。
   - 色順序の変換はOverlay側で完結させると、PPAのFPSや更新タイミングに影響しない。
 
-## 5. バックプレッシャーとドロップ戦略
+## 5. VPN同期 (Tailscale)
+
+`TAILSCALE_AUTH_KEY` が定義されている場合、TailscaleTaskがEventGroupを使ってVPN接続状態を通知する。
+
+| 同期機構 | 型 | 送信元 | 受信先 | 用途 |
+|----------|------|--------|--------|------|
+| `VPN_CONNECTED_BIT` | EventGroup BIT0 | TailscaleTask | Fetch, Detection, Connection | VPN接続完了通知 |
+
+起動シーケンス:
+1. FetchTask: `initWiFi()` → WiFi接続完了
+2. TailscaleTask: WiFi待機 → `microlink_init()` → `microlink_connect()` → VPN確立
+3. FetchTask/DetectionTask/ConnectionTask: `xEventGroupWaitBits(VPN_CONNECTED_BIT)` → 解除後にHTTP接続開始
+
+`TAILSCALE_AUTH_KEY` 未定義時はゲートをスキップし、従来通りWiFi接続後に即座にHTTP接続を開始する。
+
+## 6. バックプレッシャーとドロップ戦略
 
 - `frameQueue`満杯時: Fetchでドロップして`linearFreeQueue`へ返却
 - `renderFreeQueue`枯渇時: Renderは`displayDoneSema`を待って再利用
 - PPA Task Notification / `displayDoneSema`待ちにタイムアウト(120ms)を設け、周期ログで異常を検出
 
-## 6. 計測ログ
+## 7. 計測ログ
 
 - Fetch: `Fetch Perf: fps=... mbps=... frame=... read=... parse=... sync=... rwait=... idle=... cwait=... boot=... raw=...`
 - Decode: `Decode Perf: fps=... decode=... errors=...`
@@ -117,7 +136,7 @@ Frame N+1: PPA/Overlay on Buffer A   || DSI transfer of Buffer B
 
 この3系列を同時に見れば、30fps未達時にどこで詰まっているかを即座に切り分けできる。
 
-## 7. 負荷制御
+## 8. 負荷制御
 
 - Renderが`FPS_THROTTLE_ON`未満の状態が2秒続くと、Detection/Connection更新間隔を段階的に拡大。
 - Renderが`FPS_THROTTLE_OFF`以上の状態が5秒続くと、更新間隔を通常値へ復帰。
