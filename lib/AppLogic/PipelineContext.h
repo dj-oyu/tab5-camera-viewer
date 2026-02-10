@@ -24,13 +24,6 @@ struct FrameData
   bool is_linear;
 };
 
-struct DecodedFrameData
-{
-  int buf_idx;
-  uint8_t *linear_buf;
-  bool has_linear_buf;
-};
-
 struct SideLoadProfile
 {
   float render_fps = 0.0f;
@@ -46,34 +39,28 @@ public:
   [[nodiscard]] bool init();
 
   QueueHandle_t frameQueue() const { return frame_queue_; }
-  QueueHandle_t decodedFrameQueue() const { return decoded_frame_queue_; }
   QueueHandle_t linearFreeQueue() const { return linear_free_queue_; }
-  QueueHandle_t renderFreeQueue() const { return render_free_queue_; }
 
   TaskHandle_t renderTaskHandle() const { return render_task_handle_; }
   void setRenderTaskHandle(TaskHandle_t h) { render_task_handle_ = h; }
-  SemaphoreHandle_t displayDoneSema() const { return display_done_sema_; }
+  SemaphoreHandle_t dma2dGate() const { return dma2d_gate_; }
 
   esp_lcd_panel_handle_t panelHandle() const { return panel_handle_; }
   void setPanelHandle(esp_lcd_panel_handle_t handle) { panel_handle_ = handle; }
 
-  uint16_t *decodeBuffer(int idx) { return decode_bufs_[idx]; }
-  const uint16_t *decodeBuffer(int idx) const { return decode_bufs_[idx]; }
-  uint8_t *decodeBufferBytes(int idx)
-  {
-    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
-  }
-  const uint8_t *decodeBufferBytes(int idx) const
-  {
-    return reinterpret_cast<const uint8_t *>(decode_bufs_[idx]);
-  }
-  int nextDecodeIndex();
+  uint16_t *panelFramebuffer() const { return panel_fb_; }
+  void setPanelFramebuffer(uint16_t *fb) { panel_fb_ = fb; }
+
+  // Decoded frame double-buffer API (replaces decodedFrameQueue)
+  uint8_t *acquireDecodeBuf(TickType_t timeout = portMAX_DELAY);
+  void commitDecodedFrame();
+  void discardDecodeBuf();
+  uint8_t *waitDecodedFrame(TickType_t timeout);
+  void releaseDecodedFrame();
+  int decodedFramesPending() const;
 
   [[nodiscard]] bool acquireLinear(uint8_t *&out_buf);
   void releaseLinear(uint8_t *buf);
-  [[nodiscard]] bool acquireRenderBuffer(uint16_t *&out_buf,
-                                         TickType_t wait_ticks = 0);
-  void releaseRenderBuffer(uint16_t *buf);
   void updateRenderFps(float fps, uint32_t now_ms);
   [[nodiscard]] SideLoadProfile sideLoadProfile() const;
 
@@ -88,18 +75,24 @@ public:
 
 private:
   QueueHandle_t frame_queue_ = nullptr;
-  QueueHandle_t decoded_frame_queue_ = nullptr;
   QueueHandle_t linear_free_queue_ = nullptr;
-  QueueHandle_t render_free_queue_ = nullptr;
   TaskHandle_t render_task_handle_ = nullptr;
-  SemaphoreHandle_t display_done_sema_ = nullptr;
+  SemaphoreHandle_t dma2d_gate_ = nullptr;
   esp_lcd_panel_handle_t panel_handle_ = nullptr;
+  uint16_t *panel_fb_ = nullptr;
 
-  uint16_t *decode_bufs_[2] = {nullptr, nullptr};
-  int decode_idx_ = 0;
+  uint8_t *decodeBufferBytes(int idx)
+  {
+    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
+  }
+
+  uint16_t *decode_bufs_[DECODE_BUF_COUNT] = {};
+  SemaphoreHandle_t decode_slot_sema_ = nullptr;
+  SemaphoreHandle_t decoded_frame_sema_ = nullptr;
+  int decode_write_idx_ = 0;
+  int decode_read_idx_ = 0;
 
   uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
-  uint16_t *render_bufs_[RENDER_BUF_COUNT] = {};
   SemaphoreHandle_t perf_mutex_ = nullptr;
   SideLoadProfile side_profile_ = {};
   uint32_t below_fps_since_ms_ = 0;

@@ -30,20 +30,18 @@ M5Stack Tab5でHTTP MJPEGストリームを高速表示するための3ステー
 │                    3-Stage Pipeline                         │
 └─────────────────────────────────────────────────────────────┘
 
-Stage 1: Fetch Task (Priority 5, Core 1)
+Stage 1: Fetch Task (Priority 6, Core 1)
   [HTTP Stream] → [Chunked Decoder] → [Linear Buffer]
                                               ↓
-                                        frameQueue (3 slots)
+                                        frameQueue (2 slots)
                                               ↓
 Stage 2: Decode Task (Priority 5, Core 0)
-  [JPEG HW Decoder] → decode_bufs[0/1]
+  [JPEG HW Decoder] → decode_bufs[0/1] (セマフォでダブルバッファ管理)
                                               ↓
-                                    decodedFrameQueue (2 slots)
+                                    decode semaphores (2 slots)
                                               ↓
-Stage 3: Render Task (Priority 6, Core 1)
-  [PPA Transform] → [Overlay] → [DSI Transfer]
-                  ↑               ↓
-             renderFreeQueue (2 slots)
+Stage 3: Render Task (Priority 5, Core 1)
+  [PPA Transform → Panel FB直接書込み] → [Overlay → Panel FB bar領域]
 ```
 
 ### タイムライン
@@ -71,15 +69,25 @@ struct FrameData {
 };
 ```
 
-### DecodedFrameData (Decode → Render)
+### Decode → Render (セマフォベース)
+
+FreeRTOS Queue の代わりに `PipelineContext` の API でダブルバッファを管理:
 
 ```cpp
-struct DecodedFrameData {
-    int buf_idx;            // decode_bufs[0/1]のインデックス
-    uint8_t *linear_buf;    // 返却するlinear buffer
-    bool has_linear_buf;    // linear bufferの有無
-};
+// DecodeTask:
+uint8_t *buf = ctx->acquireDecodeBuf();   // slot取得 (空きなければブロック)
+// ... JPEG HW decode into buf ...
+ctx->commitDecodedFrame();                 // RenderTaskに通知
+// (失敗時は ctx->discardDecodeBuf() でslot返却)
+
+// RenderTask:
+uint8_t *buf = ctx->waitDecodedFrame(timeout);  // フレーム待ち
+// ... PPA transform from buf → panel FB ...
+ctx->releaseDecodedFrame();                      // slot返却
 ```
+
+内部実装: カウンティングセマフォ2個 (`decode_slot_sema_`, `decoded_frame_sema_`) で
+デコード前にslotを確保し、PPA完了後に解放。バッファ上書きレースを防止。
 
 ## バッファ管理
 
@@ -89,18 +97,15 @@ struct DecodedFrameData {
 ┌──────────────────────────────────────────────────────────┐
 │                  INTERNAL SRAM (優先領域)                 │
 ├──────────────────────────────────────────────────────────┤
-│ Fetch RX buffer (32KB)                                    │
-│   - WiFiClient::read() の受信キャッシュ                   │
-├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [0..N-1] (82KB x N, N=LINEAR_INTERNAL...) │
-│   - Fetch hot path優先配置 (確保失敗時はSPIRAMへフォールバック) │
+│ Fetch RX buffer (32KB, SPIRAM優先・フォールバック内部)      │
+│   - ソケットread受信キャッシュ                             │
 └──────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
 │                    SPIRAM (16MB+)                        │
 ├──────────────────────────────────────────────────────────┤
-│ Linear Buffers [N..2] (82KB)                              │
-│   - トリプルバッファ残り領域                               │
+│ Linear Buffers [0..1] (82KB × 2)                         │
+│   - JPEG圧縮フレーム用ダブルバッファ                       │
 ├──────────────────────────────────────────────────────────┤
 │ Decode Buffers [0] (640×480×2 = 614KB)                  │
 │   - JPEG decode出力 (RGB565)                             │
@@ -108,11 +113,11 @@ struct DecodedFrameData {
 │ Decode Buffers [1] (640×480×2 = 614KB)                  │
 │   - ダブルバッファリング                                 │
 ├──────────────────────────────────────────────────────────┤
-│ Render Buffers [0] (720×1280×2 = 1.76MB)                │
-│   - Render出力用                                         │
+│ Panel Framebuffer (720×1280×2 = 1.76MB × 1)             │
+│   - PPA DMA2D出力先 + Overlay描画先 (DSI直接読取)         │
 ├──────────────────────────────────────────────────────────┤
-│ Render Buffers [1] (720×1280×2 = 1.76MB)                │
-│   - DSI転送中と次フレーム生成を分離                       │
+│ MicroLink Coord Buffer (64KB)                            │
+│   - Tailscale MapResponse解析用 (VPN有効時のみ)          │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -121,27 +126,22 @@ struct DecodedFrameData {
 ```
 HTTP Stream
     ↓
-Linear Buffer [0/1/2] ←───────────┐
+Linear Buffer [0/1] ←────────────┐
     │                             │
     │ (JPEG圧縮データ)            │
     ↓                             │
 frameQueue                        │
     ↓                             │
-JPEG Decoder                      │
+JPEG HW Decoder (DMA2D)          │
     ↓                             │
 Decode Buffers [0/1]              │
+    │  (セマフォでダブルバッファ管理) │
     ↓                             │
-decodedFrameQueue                 │
+PPA Transform (DMA2D) → Panel FB  │
     ↓                             │
-renderFreeQueue ───────────────┐  │
-    ↓                          │  │
-Render Buffer [0/1]            │  │
-    ↓                          │  │
-PPA Transform + Overlay        │  │
+Overlay → Panel FB bar領域        │
     ↓                             │
-DSI Transfer (in-flight) ─────────┘
-    ↓                             │
-Display                           │
+Display (DSI がFBを直接読取)       │
                                   │
 Linear Buffer Pool ───────────────┘
 (linearFreeQueue)
@@ -153,45 +153,50 @@ Linear Buffer Pool ───────────────┘
 
 | キュー名            | サイズ | 送信元 | 受信先 | 用途                |
 | ------------------- | ------ | ------ | ------ | ------------------- |
-| `frameQueue`        | 3      | Fetch  | Decode | JPEG圧縮データ      |
-| `decodedFrameQueue` | 2      | Decode | Render | デコード済みRGB565  |
-| `linearFreeQueue`   | 3      | Render | Fetch  | Linear buffer再利用 |
-| `renderFreeQueue`   | 2      | Render | Render | 描画バッファ再利用  |
+| `frameQueue`        | 2      | Fetch  | Decode | JPEG圧縮データ      |
+| `linearFreeQueue`   | 2      | Decode | Fetch  | Linear buffer再利用 |
 
 ### 同期プリミティブ
 
-| 名前                | 種類              | 用途            |
-| ------------------- | ----------------- | --------------- |
-| PPA完了通知         | Task Notification | PPA処理完了通知 (index 0) |
-| `displayDoneSema`   | Binary Semaphore  | DSI転送完了通知 |
+| 名前                   | 種類                 | 用途                          |
+| ---------------------- | -------------------- | ----------------------------- |
+| `decode_slot_sema_`    | Counting Semaphore(2) | デコードバッファ空きslot管理   |
+| `decoded_frame_sema_`  | Counting Semaphore(2) | デコード済みフレーム通知       |
+| `dma2d_gate_`          | Counting Semaphore(2) | JPEG+PPA DMA2D並列制御        |
+| PPA完了通知            | Task Notification    | PPA処理完了通知 (index 0)     |
 
 > **Note**: PPA完了通知は `vTaskNotifyGiveFromISR` / `ulTaskNotifyTake` を使用。
-> pioarduino の `configTASK_NOTIFICATION_ARRAY_ENTRIES=1` 制約により、
-> indexed API は使用不可。Display完了はBinary Semaphoreを維持。
 
 ### 同期フロー
 
 ```
-Render Task (Frame N):
+Decode Task:
     │
-    ├─ renderFreeQueueから描画先バッファ取得
+    ├─ acquireDecodeBuf() ← decode_slot_sema_ 取得 (空きバッファ待ち)
     │
-    ├─ PPAPipeline::submit() (非同期開始、notify_task=renderTaskHandle)
+    ├─ dma2d_gate_ 取得
+    ├─ JPEG HW Decode → decode_buf[write_idx]
+    ├─ dma2d_gate_ 解放
     │
-    ├─ ulTaskNotifyTake(pdTRUE, 120ms) ← PPA完了待ち (Task Notification)
-    │
-    ├─ OverlayRenderer::render()
-    │
-    ├─ (in-flightバッファがある場合)
-    │   xSemaphoreTake(displayDoneSema, 120ms) ← Frame N-1のDSI完了待ち
-    │
-    ├─ esp_lcd_panel_draw_bitmap() (DSI転送開始、非同期)
+    ├─ commitDecodedFrame() ← decoded_frame_sema_ 通知
     │
     └─ (次のループへ)
 
-ISR (DSI Transfer Done):
+Render Task:
     │
-    └─ xSemaphoreGiveFromISR(displayDoneSema) ← Frame N完了通知
+    ├─ waitDecodedFrame() ← decoded_frame_sema_ 取得 (フレーム待ち)
+    │
+    ├─ dma2d_gate_ 取得
+    ├─ PPAPipeline::submit() → Panel FB video領域 (DMA2D非同期)
+    ├─ ulTaskNotifyTake(pdTRUE, 120ms) ← PPA完了待ち
+    ├─ dma2d_gate_ 解放
+    │
+    ├─ releaseDecodedFrame() ← decode_slot_sema_ 返却
+    │
+    ├─ OverlayRenderer::render() → Panel FB bar領域
+    │   (esp_cache_msync で PSRAM キャッシュフラッシュ)
+    │
+    └─ (draw_bitmap不要: DSI がPanel FBを直接読取)
 
 ISR (PPA Done):
     │
@@ -283,12 +288,11 @@ FPS = 1000ms / 16ms = 62.5 FPS
 
 ### タイムアウト
 
-| 操作                  | タイムアウト | 動作                     |
-| --------------------- | ------------ | ------------------------ |
-| frameQueue受信        | 1000ms       | vTaskDelay(1)            |
-| decodedFrameQueue受信 | 1000ms       | vTaskDelay(1)            |
-| displayDoneSema       | 120ms        | バッファ返却してスキップ |
-| PPA Task Notification | 120ms        | バッファ返却してスキップ |
+| 操作                     | タイムアウト | 動作                     |
+| ------------------------ | ------------ | ------------------------ |
+| frameQueue受信           | 1000ms       | vTaskDelay(1)            |
+| waitDecodedFrame         | 1000ms       | vTaskDelay(1)            |
+| PPA Task Notification    | 120ms        | バッファ返却してスキップ |
 
 ### リソース枯渇
 
@@ -319,11 +323,11 @@ if (xQueueSend(frameQueue, &fd, pdMS_TO_TICKS(1)) != pdTRUE) {
 
 ### 静的割り当て
 
-- Linear Buffers: 82KB × 3 = 246KB
+- Linear Buffers: 82KB × 2 = 164KB
 - Decode Buffers: 614KB × 2 = 1.2MB
-- Render Buffers: 1.76MB × 2 = 3.52MB
+- Panel Framebuffer: 1.76MB × 1
 
-**合計: ~4.9MB (SPIRAM)**
+**合計: ~3.1MB (SPIRAM)**
 
 ### FreeRTOS
 
@@ -359,10 +363,12 @@ PANEL_HEIGHT = 1280
 
 // バッファサイズ
 LINEAR_BUF_SIZE = 83558          // 82KB (max 66KB + 25% margin)
-LINEAR_BUF_COUNT = 3             // トリプルバッファ
-LINEAR_INTERNAL_CACHE_COUNT = 2  // 先頭2本を内部SRAM優先
+LINEAR_BUF_COUNT = 2             // ダブルバッファ
+LINEAR_INTERNAL_CACHE_COUNT = 0  // 全てSPIRAM (内部SRAM節約)
 INTERNAL_CACHE_GUARD_BYTES = 131072 // 内部SRAM最低残量ガード
 DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2  // 614,400 bytes
+DECODE_BUF_COUNT = 2             // ダブルデコードバッファ (JPEG/PPA並列用)
+DMA2D_GATE_COUNT = 2             // JPEG+PPA並列 (PPA直接FB書込みでdisplay DMA2D不使用)
 FETCH_RX_BUF_SIZE = 32768
 FETCH_TCP_RCVBUF_BYTES = 65536
 FETCH_BLOCK_TIMEOUT_MS = 4
@@ -375,13 +381,14 @@ VERIFY_WIFI_DIAG_LOG = false
 
 // 性能ログ / 負荷制御
 PERF_LOG_INTERVAL_MS = 2000
-FPS_THROTTLE_ON = 28.0
-FPS_THROTTLE_OFF = 29.5
+FPS_THROTTLE_ON = 24.0
+FPS_THROTTLE_OFF = 26.0
 
 // タスクスタック（個別最適化）
 STACK_DEPTH_RENDER = 10240
 STACK_DEPTH_FETCH  = 12288
 STACK_DEPTH_DECODE = 8192
+STACK_DEPTH_TAILSCALE = 16384   // TLS + cJSON
 ```
 
 ## デバッグ

@@ -3,15 +3,20 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+build/
 *.idx
 *.env*
 sample/tab5-userdemo
 .claude/settings.local.json
 
-# Hybrid Compile (custom_sdkconfig) generated files
+# garbage files
+nul
+
+# ESP-IDF build artifacts
 .dummy/
 managed_components/
 sdkconfig.*
+!sdkconfig.defaults
 *.map
 build_verbose.log
 

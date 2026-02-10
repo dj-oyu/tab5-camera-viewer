@@ -1,0 +1,18 @@
+# TCP/IP optimization for MJPEG streaming via WireGuard tunnel
+# TCP_WND=65534 is the max without window scaling (u16_t limit)
+# DERP relay caps throughput at ~1.4 Mbps regardless of window size
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# Bootloader: minimize size to fit within 0x2000-0x8000 (24KB)
+# Source-compiled bootloader exceeds 24KB with default log level
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL=0
+
+# Flash size (Tab5 = 16MB)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Extend interrupt WDT timeout for DMA2D serialization
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800

@@ -8,6 +8,10 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 
+#ifdef TAILSCALE_AUTH_KEY
+#include "TailscaleTask.h"
+#endif
+
 namespace {
 
 constexpr uint32_t STATUS_POLL_INTERVAL_MS = 2000;   // Poll status every 2 seconds
@@ -173,6 +177,18 @@ void recordingTask(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   Serial.println("RecordingTask: WiFi ready");
+
+#ifdef TAILSCALE_AUTH_KEY
+  {
+    EventGroupHandle_t vpn_eg = TailscaleTask::eventGroup();
+    if (vpn_eg) {
+      Serial.println("RecordingTask: Waiting for Tailscale VPN...");
+      xEventGroupWaitBits(vpn_eg, VPN_CONNECTED_BIT, pdFALSE, pdTRUE,
+                          portMAX_DELAY);
+      Serial.println("RecordingTask: VPN ready");
+    }
+  }
+#endif
 
 #ifdef RECORDING_BASE_URL
   Serial.printf("RecordingTask: URL = %s\n", RECORDING_BASE_URL);

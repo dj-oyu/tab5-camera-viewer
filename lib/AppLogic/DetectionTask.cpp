@@ -8,6 +8,10 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 
+#ifdef TAILSCALE_AUTH_KEY
+#include "TailscaleTask.h"
+#endif
+
 namespace {
 
 bool tryReadInt(const JsonObjectConst &obj, const char *key, int &out) {
@@ -102,6 +106,18 @@ void detectionTask(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(100));
   }
   Serial.println("DetectionTask: WiFi ready");
+
+#ifdef TAILSCALE_AUTH_KEY
+  {
+    EventGroupHandle_t vpn_eg = TailscaleTask::eventGroup();
+    if (vpn_eg) {
+      Serial.println("DetectionTask: Waiting for Tailscale VPN...");
+      xEventGroupWaitBits(vpn_eg, VPN_CONNECTED_BIT, pdFALSE, pdTRUE,
+                          portMAX_DELAY);
+      Serial.println("DetectionTask: VPN ready");
+    }
+  }
+#endif
 
 #ifdef DETECTION_URL
   WiFiClient httpClient;

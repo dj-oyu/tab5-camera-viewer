@@ -48,10 +48,10 @@
 
 ## 実機テスト（手動確認）
 
-- [ ] デバッグ Tile で電圧/電流の生値が妥当か確認
-- [ ] 充電中の電流符号を確認（正=充電 or 負=充電、必要なら `BatteryTask.cpp` の条件を反転）
+- [x] デバッグ Tile で電圧/電流の生値が妥当か確認
+- [x] 充電中の電流符号を確認（正=充電 or 負=充電、必要なら `BatteryTask.cpp` の条件を反転）
 - [ ] 充電中の電圧上昇による%ズレを確認、必要なら充電時補正を追加
-- [ ] USB ホットプラグ耐性テスト
+- [x] USB ホットプラグ耐性テスト
   - M5Unified の In_I2C 経由でもハングするか確認
   - ハングする場合: ポーリング間隔を長くする / I2C読み取りをタイムアウト保護
 
@@ -173,10 +173,52 @@ TCP_WND=16384 テスト時に以下の設定が反映されなかった:
   - TCP_WND=8192 + SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y → **30.3 fps 達成** ✅
   - 起動時に散発的な USB CDC ISR クラッシュあり（再起動で解消、TCP_WND とは無関係）
 
+## 完了済み (DMA2D 並列パイプライン + PPA直接FB書込み)
+
+- [x] DMA2D ISR デッドロックの根本原因を特定
+  - `esp_lcd_panel_draw_bitmap` が DMA2D (`esp_async_fbcpy`) を使う3番目のコンシューマー
+  - JPEG(RX0) + PPA(RX1) で全RXチャネル占有 → display DMA2D が PENDING → ISR デッドロック
+- [x] PPA 書込み先を panel framebuffer に直接変更
+  - `esp_lcd_dpi_panel_get_frame_buffer()` で FB ポインタ取得 → PPA DMA2D 出力先に設定
+  - `draw_bitmap` 廃止（PPA DMA2D は PSRAM 直接書込み、overlay は独自 `esp_cache_msync`）
+- [x] render_buf 廃止 → ~3.5MB SPIRAM 節約
+  - `render_bufs_[2]`, `render_free_queue_`, `display_done_sema_`, `RenderedFrameData` 削除
+- [x] `DMA2D_GATE_COUNT=2` でカウンティングセマフォ並列実行
+  - JPEG(Core0) と PPA(Core1) が DMA2D 上で並列動作
+- [x] DecodeTask perf logging 改善（error/truncated パスでもログ出力）
+
+## 完了済み (decodedFrameQueue 簡素化)
+
+- [x] `decodedFrameQueue` (FreeRTOS Queue) をカウンティングセマフォベースの API に置換
+  - `DecodedFrameData` 構造体削除、`nextDecodeIndex()` 削除
+  - 新 API: `acquireDecodeBuf()` / `commitDecodedFrame()` / `discardDecodeBuf()`
+  - 新 API: `waitDecodedFrame()` / `releaseDecodedFrame()` / `decodedFramesPending()`
+  - デコード前に slot 確保 → バッファ上書きレースコンディション解消
+- [x] `docs/pipeline-architecture.md`, `docs/task-interactions.md` を現状コードに同期
+  - render_buf 廃止・PPA直接FB書込み・セマフォベース API を反映
+
+## 次のタスク
+
+### 内部 SRAM メモリ最適化
+
+render_buf 廃止で ~3.5MB SPIRAM が空いた。内部 SRAM も最適化して以下を検討:
+
+1. **TCP Window 増量**: `TCP_WND=8192` → より大きな値でスループット向上
+   - TCP_WND=16384 は以前 SDIO クラッシュ（内部 SRAM 不足）→ SPIRAM 活用で回避可能か
+   - `CONFIG_LWIP_TCP_WND_DEFAULT` + `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`
+2. **SPIRAM → 内部 SRAM 移動**: 高速アクセスが必要なバッファを内部 SRAM に移動
+   - Linear buffer (JPEG input): 内部 SRAM に 1 本置くとフェッチ速度向上の可能性
+   - `LINEAR_INTERNAL_CACHE_COUNT=1` で既に対応可能（現在は 0 = 全て SPIRAM）
+3. **FETCH_RX_BUF_SIZE 最適化**: 現在 32KB (内部 SRAM)
+   - ソケット read バッファサイズと内部 SRAM 消費のトレードオフ
+4. **ヒープ使用量の計測**: `heap_caps_get_free_size()` で起動後の空き領域を定期ログ
+
 ## クリーンアップ（動作確認後）
 
-- [ ] デバッグ用 Tile 1 (renderDebugTile) を削除
-- [ ] 充電検出が安定したら稲妻マーク表示を有効化
+- [x] 充電検出が安定したら稲妻マーク表示を有効化 → 既に有効（INA226電流符号で判定）
+- [ ] デバッグ用 Tile 1 (renderDebugTile) の用途決定
+  - 現在は WiFi RSSI + VPN 状態表示に転用済み（Tailscale ブランチ）
+  - Tailscale 不要時は削除 or 別の情報に差替え
 - [ ] バッテリーアイコンの表示微調整
 - [ ] LiPo電圧カーブの微調整（実測データに基づく）
 

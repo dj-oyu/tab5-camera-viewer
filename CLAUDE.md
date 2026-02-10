@@ -25,6 +25,7 @@ MJPEG_URL="http://<server>/stream"
 DETECTION_URL="http://<server>/api/detections/stream?format=json"
 CONNECTIONS_URL="http://<server>/api/connections/stream"
 RECORDING_BASE_URL="http://<server>/api/recording"
+TAILSCALE_AUTH_KEY="tskey-auth-xxxxx"  # Optional: enables Tailscale VPN
 ```
 
 ## Architecture
@@ -42,6 +43,7 @@ Fetch (P6, Core1) → frameQueue → Decode (P5, Core0) → decodedFrameQueue �
 - **Render**: PPA scale/rotate → DSI display
 
 Additional tasks: `DetectionTask`, `ConnectionTask` (both P4, Core1) for SSE API streams.
+Optional: `TailscaleTask` (P3, Core0) for Tailscale VPN via MicroLink (`components/microlink/`).
 
 ### Key Files
 
@@ -51,6 +53,7 @@ Additional tasks: `DetectionTask`, `ConnectionTask` (both P4, Core1) for SSE API
 | `lib/AppLogic/PipelineContext.h` | Queues, semaphores, buffer management |
 | `lib/AppLogic/FetchTask.cpp` | HTTP chunked stream parsing |
 | `lib/AppLogic/OverlayRenderer.cpp` | Detection/connection display (side bars) |
+| `lib/AppLogic/TailscaleTask.cpp` | Tailscale VPN client (MicroLink wrapper) |
 | `lib/PPAPipeline/` | ESP32-P4 PPA hardware abstraction |
 
 ### Memory Layout (SPIRAM 16MB)
