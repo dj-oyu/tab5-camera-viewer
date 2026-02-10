@@ -14,13 +14,15 @@ constexpr uint32_t PANEL_WIDTH = 720;
 constexpr uint32_t PANEL_HEIGHT = 1280;
 
 constexpr uint32_t DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2; // RGB565 at stream resolution
+constexpr uint32_t DECODE_BUF_COUNT = 2;  // ダブルデコードバッファ (JPEG/PPA並列用)
+constexpr uint32_t DMA2D_GATE_COUNT = 2;  // JPEG+PPA並列 (PPA直接FB書込みでdisplay DMA2D不使用)
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
-constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ
+constexpr uint32_t LINEAR_BUF_COUNT = 2;      // トリプルバッファ
 constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 0; // 内部SRAM節約: 全てSPIRAM
 constexpr uint32_t INTERNAL_CACHE_GUARD_BYTES = 128 * 1024; // 内部SRAMを使い切らないための最低確保量
 constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
-constexpr uint32_t RENDER_BUF_COUNT = 2;      // Display submit用ダブルバッファ
+// render_buf廃止: PPA直接FB書込みにより不要
 constexpr uint32_t FETCH_RX_BUF_SIZE = 32768; // Fetch socket read size (internal SRAM cache)
 constexpr uint32_t FETCH_TCP_RCVBUF_BYTES = 64 * 1024;
 constexpr uint32_t FETCH_BLOCK_TIMEOUT_MS = 4;
@@ -37,8 +39,8 @@ constexpr bool VERIFY_WIFI_DIAG_LOG = false;   // Step-3 validation: dump WiFi d
 constexpr bool VERBOSE_PERF_LOG = true;         // Render/Fetch FPS periodic logs
 constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
 constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
-constexpr float FPS_THROTTLE_ON = 28.0f;
-constexpr float FPS_THROTTLE_OFF = 29.5f;
+constexpr float FPS_THROTTLE_ON = 24.0f;
+constexpr float FPS_THROTTLE_OFF = 26.0f;
 
 // Overlay configuration (for landscape viewing)
 constexpr uint32_t OVERLAY_BAR_SIZE = 160;    // 黒帯サイズ (top/bottom in framebuffer)

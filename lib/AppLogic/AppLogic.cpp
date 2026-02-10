@@ -46,7 +46,7 @@ void AppLogic::begin() {
   cfg.output_power = true;
   M5.begin(cfg);
 
-  Serial.println("AppLogic v65: Double render buffer pipeline");
+  Serial.println("AppLogic v66: PPA direct-to-FB, DMA2D gate=2");
   Serial.printf("Panel: %dx%d\n", PANEL_WIDTH, PANEL_HEIGHT);
 
   if (!PPAPipeline::begin()) {

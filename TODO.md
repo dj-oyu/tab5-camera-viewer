@@ -173,6 +173,49 @@ TCP_WND=16384 テスト時に以下の設定が反映されなかった:
   - TCP_WND=8192 + SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y → **30.3 fps 達成** ✅
   - 起動時に散発的な USB CDC ISR クラッシュあり（再起動で解消、TCP_WND とは無関係）
 
+## 完了済み (DMA2D 並列パイプライン + PPA直接FB書込み)
+
+- [x] DMA2D ISR デッドロックの根本原因を特定
+  - `esp_lcd_panel_draw_bitmap` が DMA2D (`esp_async_fbcpy`) を使う3番目のコンシューマー
+  - JPEG(RX0) + PPA(RX1) で全RXチャネル占有 → display DMA2D が PENDING → ISR デッドロック
+- [x] PPA 書込み先を panel framebuffer に直接変更
+  - `esp_lcd_dpi_panel_get_frame_buffer()` で FB ポインタ取得 → PPA DMA2D 出力先に設定
+  - `draw_bitmap` 廃止（PPA DMA2D は PSRAM 直接書込み、overlay は独自 `esp_cache_msync`）
+- [x] render_buf 廃止 → ~3.5MB SPIRAM 節約
+  - `render_bufs_[2]`, `render_free_queue_`, `display_done_sema_`, `RenderedFrameData` 削除
+- [x] `DMA2D_GATE_COUNT=2` でカウンティングセマフォ並列実行
+  - JPEG(Core0) と PPA(Core1) が DMA2D 上で並列動作
+- [x] DecodeTask perf logging 改善（error/truncated パスでもログ出力）
+
+## 次のタスク
+
+### decodedFrameQueue 簡素化の検討
+
+`ctx->decodeBufferBytes(dfd.buf_idx)` を `ctx->getDecodedBuf()` のようなAPIに置き換え、
+`decodedFrameQueue` (buf_idx を運ぶ Queue) を削除できるか検討。
+
+**現状**: DecodeTask → `decodedFrameQueue(DecodedFrameData{buf_idx})` → RenderTask
+**候補**: ダブルバッファの swap を atomic/セマフォで管理し、Queue を不要にする
+
+考慮点:
+- `DECODE_BUF_COUNT=2` でダブルバッファ: DecodeTask が書込み中の buf と RenderTask が読取中の buf
+- Queue 深度=2 がバックプレッシャー制御を兼ねている → 代替メカニズムが必要
+- Queue 削除による内部 SRAM 節約量は微小 (~100B)、主にコード簡素化が目的
+
+### 内部 SRAM メモリ最適化
+
+render_buf 廃止で ~3.5MB SPIRAM が空いた。内部 SRAM も最適化して以下を検討:
+
+1. **TCP Window 増量**: `TCP_WND=8192` → より大きな値でスループット向上
+   - TCP_WND=16384 は以前 SDIO クラッシュ（内部 SRAM 不足）→ SPIRAM 活用で回避可能か
+   - `CONFIG_LWIP_TCP_WND_DEFAULT` + `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`
+2. **SPIRAM → 内部 SRAM 移動**: 高速アクセスが必要なバッファを内部 SRAM に移動
+   - Linear buffer (JPEG input): 内部 SRAM に 1 本置くとフェッチ速度向上の可能性
+   - `LINEAR_INTERNAL_CACHE_COUNT=1` で既に対応可能（現在は 0 = 全て SPIRAM）
+3. **FETCH_RX_BUF_SIZE 最適化**: 現在 32KB (内部 SRAM)
+   - ソケット read バッファサイズと内部 SRAM 消費のトレードオフ
+4. **ヒープ使用量の計測**: `heap_caps_get_free_size()` で起動後の空き領域を定期ログ
+
 ## クリーンアップ（動作確認後）
 
 - [ ] デバッグ用 Tile 1 (renderDebugTile) を削除

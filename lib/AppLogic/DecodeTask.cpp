@@ -27,6 +27,7 @@ namespace
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto frame_queue = ctx->frameQueue();
     auto decoded_queue = ctx->decodedFrameQueue();
+    auto dma2d_gate = ctx->dma2dGate();
 
     // Suppress noisy ESP-IDF JPEG decoder internal errors
     // (e.g. "data units mismatch" on truncated frames)
@@ -54,6 +55,8 @@ namespace
     uint32_t perf_window_start = millis();
     FrameData fd;
 
+    Serial.println("DecodeTask: Started (JPEG only, dma2d_gate)");
+
     while (1)
     {
       if (xQueueReceive(frame_queue, &fd, pdMS_TO_TICKS(1000)) == pdTRUE)
@@ -75,10 +78,13 @@ namespace
           continue;
         }
 
+        int current_idx = ctx->nextDecodeIndex();
         uint32_t out_size = 0;
         size_t process_len = fd.aligned_len;
 
-        int current_idx = ctx->nextDecodeIndex();
+        // DMA2D gate: JPEG HW decoder uses DMA2D channels
+        xSemaphoreTake(dma2d_gate, portMAX_DELAY);
+
         int64_t decode_start = esp_timer_get_time();
         esp_err_t ret = jpeg_decoder_process(
             decoder, &dec_cfg, fd.buf, process_len,
@@ -86,23 +92,31 @@ namespace
         perf_decode_us +=
             static_cast<uint64_t>(esp_timer_get_time() - decode_start);
 
+        xSemaphoreGive(dma2d_gate);
+
+        // Release linear buffer ASAP (FetchTask can reuse immediately)
+        if (fd.is_linear) { ctx->releaseLinear(fd.buf); }
+
         if (ret != ESP_OK || out_size == 0)
         {
           perf_errors++;
-          if (fd.is_linear)
+          if (perf_errors <= 3)
           {
-            ctx->releaseLinear(fd.buf);
+            Serial.printf("Decode: jpeg failed err=%d(%s) out=%u len=%u aligned=%u buf=%d\n",
+                          static_cast<int>(ret), esp_err_to_name(ret),
+                          out_size, static_cast<uint32_t>(fd.len),
+                          static_cast<uint32_t>(process_len), current_idx);
           }
-          continue;
+        }
+        else
+        {
+          // Queue decoded frame for RenderTask (PPA)
+          DecodedFrameData dfd = {.buf_idx = current_idx};
+          xQueueSend(decoded_queue, &dfd, portMAX_DELAY);
+          perf_frames++;
         }
 
-        DecodedFrameData dfd;
-        dfd.buf_idx = current_idx;
-        dfd.linear_buf = fd.is_linear ? fd.buf : nullptr;
-        dfd.has_linear_buf = fd.is_linear;
-        xQueueSend(decoded_queue, &dfd, portMAX_DELAY);
-        perf_frames++;
-
+        // Perf logging (runs for both success and error paths)
         uint32_t now = millis();
         if (perf_frames >= PERF_LOG_WINDOW_FRAMES ||
             ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS &&
@@ -114,7 +128,8 @@ namespace
             window_ms = 1;
           }
           Serial.printf(
-              "Decode Perf: fps=%.1f decode=%lluus errors=%u truncated=%u queues(in=%u out=%u)\n",
+              "Decode Perf: fps=%.1f decode=%lluus errors=%u truncated=%u "
+              "queues(in=%u out=%u)\n",
               (1000.0f * perf_frames) / window_ms,
               static_cast<unsigned long long>(perf_decode_us / perf_frames),
               perf_errors, perf_truncated,
@@ -127,12 +142,12 @@ namespace
           perf_decode_us = 0;
           perf_window_start = now;
         }
-        // Log errors even when no frames decoded successfully
         else if ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS &&
                  perf_frames == 0 && (perf_errors > 0 || perf_truncated > 0))
         {
           Serial.printf(
-              "Decode ERRORS: recv=%u errors=%u truncated=%u queues(in=%u out=%u)\n",
+              "Decode ERRORS: recv=%u errors=%u truncated=%u "
+              "queues(in=%u out=%u)\n",
               perf_received, perf_errors, perf_truncated,
               uxQueueMessagesWaiting(frame_queue),
               uxQueueMessagesWaiting(decoded_queue));
@@ -141,7 +156,6 @@ namespace
           perf_truncated = 0;
           perf_window_start = now;
         }
-        // Log idle state (no frames received at all)
         else if ((now - perf_window_start) >= 5000 &&
                  perf_frames == 0 && perf_received == 0)
         {

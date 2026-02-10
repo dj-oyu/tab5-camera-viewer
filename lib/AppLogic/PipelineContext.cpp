@@ -67,19 +67,17 @@ bool PipelineContext::init() {
     return false;
   }
 
-  display_done_sema_ = xSemaphoreCreateBinary();
-  if (!display_done_sema_) {
-    Serial.println("Failed to create display done semaphore");
+  dma2d_gate_ = xSemaphoreCreateCounting(DMA2D_GATE_COUNT, DMA2D_GATE_COUNT);
+  if (!dma2d_gate_) {
+    Serial.println("Failed to create DMA2D gate semaphore");
     return false;
   }
-  xSemaphoreGive(display_done_sema_);
+  Serial.printf("DMA2D gate: count=%u\n", DMA2D_GATE_COUNT);
 
   linear_free_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(uint8_t *));
   frame_queue_ = xQueueCreate(LINEAR_BUF_COUNT, sizeof(FrameData));
-  decoded_frame_queue_ = xQueueCreate(2, sizeof(DecodedFrameData));
-  render_free_queue_ = xQueueCreate(RENDER_BUF_COUNT, sizeof(uint16_t *));
-  if (!linear_free_queue_ || !frame_queue_ || !decoded_frame_queue_ ||
-      !render_free_queue_) {
+  decoded_frame_queue_ = xQueueCreate(DECODE_BUF_COUNT, sizeof(DecodedFrameData));
+  if (!linear_free_queue_ || !frame_queue_ || !decoded_frame_queue_) {
     Serial.println("Failed to create queues");
     return false;
   }
@@ -98,7 +96,7 @@ bool PipelineContext::init() {
     xQueueSend(linear_free_queue_, &linear_bufs_[i], 0);
   }
 
-  for (int i = 0; i < 2; ++i) {
+  for (int i = 0; i < DECODE_BUF_COUNT; ++i) {
     decode_bufs_[i] = static_cast<uint16_t *>(heap_caps_aligned_alloc(
         64, DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     Serial.printf("Decode buffer[%d]: %p (size=%u)\n", i, decode_bufs_[i],
@@ -111,16 +109,7 @@ bool PipelineContext::init() {
     }
   }
 
-  for (int i = 0; i < RENDER_BUF_COUNT; ++i) {
-    render_bufs_[i] = static_cast<uint16_t *>(heap_caps_aligned_alloc(
-        64, PANEL_WIDTH * PANEL_HEIGHT * sizeof(uint16_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!render_bufs_[i]) {
-      Serial.printf("Failed to allocate render buffer[%d]\n", i);
-      return false;
-    }
-    xQueueSend(render_free_queue_, &render_bufs_[i], 0);
-  }
+  // render_buf廃止: PPA直接FB書込み (panel_fb_はDisplayInit::initで設定)
 
   if (!detection_data_.init()) {
     Serial.println("Failed to init DetectionData");
@@ -145,12 +134,6 @@ bool PipelineContext::init() {
   return true;
 }
 
-int PipelineContext::nextDecodeIndex() {
-  int current = decode_idx_;
-  decode_idx_ ^= 1;
-  return current;
-}
-
 bool PipelineContext::acquireLinear(uint8_t *&out_buf) {
   return xQueueReceive(linear_free_queue_, &out_buf, 0) == pdTRUE;
 }
@@ -159,13 +142,10 @@ void PipelineContext::releaseLinear(uint8_t *buf) {
   xQueueSend(linear_free_queue_, &buf, 0);
 }
 
-bool PipelineContext::acquireRenderBuffer(uint16_t *&out_buf,
-                                          TickType_t wait_ticks) {
-  return xQueueReceive(render_free_queue_, &out_buf, wait_ticks) == pdTRUE;
-}
-
-void PipelineContext::releaseRenderBuffer(uint16_t *buf) {
-  xQueueSend(render_free_queue_, &buf, 0);
+int PipelineContext::nextDecodeIndex() {
+  int idx = decode_idx_;
+  decode_idx_ ^= 1;
+  return idx;
 }
 
 void PipelineContext::updateRenderFps(float fps, uint32_t now_ms) {

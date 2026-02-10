@@ -14,19 +14,6 @@ namespace
     float scale;
   };
 
-  struct RenderPerfStats
-  {
-    uint32_t frames = 0;
-    uint32_t render_buf_drops = 0;
-    uint32_t ppa_timeouts = 0;
-    uint32_t display_timeouts = 0;
-    uint64_t render_buf_wait_us = 0;
-    uint64_t ppa_us = 0;
-    uint64_t overlay_us = 0;
-    uint64_t display_wait_us = 0;
-    uint64_t submit_us = 0;
-  };
-
   ScalePlan computeScalePlan()
   {
     constexpr float scale_x = static_cast<float>(PANEL_WIDTH) / STREAM_WIDTH;
@@ -49,16 +36,33 @@ namespace
     return {PPA_SRM_ROTATION_ANGLE_0, base_scale};
   }
 
+  struct RenderPerfStats
+  {
+    uint32_t frames = 0;
+    uint32_t ppa_timeouts = 0;
+    uint64_t ppa_us = 0;
+    uint64_t overlay_us = 0;
+  };
+
   void renderTask(void *pvParameters)
   {
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto decoded_queue = ctx->decodedFrameQueue();
-    auto render_free_queue = ctx->renderFreeQueue();
-    auto panel_handle = ctx->panelHandle();
+    auto dma2d_gate = ctx->dma2dGate();
+    auto *panel_fb = ctx->panelFramebuffer();
 
     Serial.println("RenderTask: Starting...");
 
+    if (!panel_fb)
+    {
+      Serial.println("RenderTask: FATAL - panel framebuffer is null!");
+      vTaskDelete(nullptr);
+      return;
+    }
+
     OverlayRenderer::init();
+
+    // PPA setup
     ScalePlan plan = computeScalePlan();
     if (plan.scale > 4.0f)
     {
@@ -69,22 +73,23 @@ namespace
       plan.scale = 0.125f;
     }
 
-    Serial.println("RenderTask: Initialized");
-
-    auto display_done = ctx->displayDoneSema();
-    // Drain initial Give so first frame waits properly.
-    xSemaphoreTake(display_done, 0);
-
-    RenderPerfStats perf;
-    uint32_t perf_window_start = millis();
-
     ppa_srm_oper_config_t ppa_config = {};
     PPAPipeline::prepareConfig(
         ppa_config, STREAM_WIDTH, STREAM_HEIGHT, PANEL_WIDTH, VIDEO_HEIGHT,
         PPA_SRM_COLOR_MODE_RGB565, PPA_SRM_COLOR_MODE_RGB565, plan.rotation,
         plan.scale, plan.scale);
 
-    uint16_t *inflight_buf = nullptr;
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+    Serial.printf("RenderTask: Initialized (PPA→FB direct, overlay, gate=%u)\n",
+                  DMA2D_GATE_COUNT);
+
+    RenderPerfStats perf;
+    uint32_t perf_window_start = millis();
+
+    // PPA writes to video area of panel framebuffer directly
+    uint16_t *videoBuffer = panel_fb + VIDEO_Y_OFFSET * PANEL_WIDTH;
+
     DecodedFrameData dfd;
 
     auto flushRenderPerf = [&](uint32_t now)
@@ -101,18 +106,13 @@ namespace
       {
         Serial.printf("Render FPS: %.1f\n", window_fps);
         Serial.printf(
-            "Render Perf: fps=%.1f buf_wait=%lluus ppa=%lluus overlay=%lluus "
-            "disp_wait=%lluus submit=%lluus drops=%u ppa_to=%u disp_to=%u "
-            "queues(decoded=%u render_free=%u)\n",
+            "Render Perf: fps=%.1f ppa=%lluus overlay=%lluus "
+            "ppa_to=%u queues(decoded=%u)\n",
             window_fps,
-            static_cast<unsigned long long>(perf.render_buf_wait_us / frame_div),
             static_cast<unsigned long long>(perf.ppa_us / frame_div),
             static_cast<unsigned long long>(perf.overlay_us / frame_div),
-            static_cast<unsigned long long>(perf.display_wait_us / frame_div),
-            static_cast<unsigned long long>(perf.submit_us / frame_div),
-            perf.render_buf_drops, perf.ppa_timeouts, perf.display_timeouts,
-            uxQueueMessagesWaiting(decoded_queue),
-            uxQueueMessagesWaiting(render_free_queue));
+            perf.ppa_timeouts,
+            uxQueueMessagesWaiting(decoded_queue));
       }
       perf = {};
       perf_window_start = now;
@@ -123,93 +123,46 @@ namespace
       if (xQueueReceive(decoded_queue, &dfd, pdMS_TO_TICKS(1000)) ==
           pdTRUE)
       {
-        if (dfd.has_linear_buf)
-        {
-          ctx->releaseLinear(dfd.linear_buf);
-        }
-
-        uint16_t *render_buf = nullptr;
-        int64_t render_buf_wait_start = esp_timer_get_time();
-        while (!ctx->acquireRenderBuffer(render_buf, pdMS_TO_TICKS(1)))
-        {
-          if (!inflight_buf)
-          {
-            break;
-          }
-
-          int64_t wait_start = esp_timer_get_time();
-          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) != pdTRUE)
-          {
-            perf.display_timeouts++;
-            break;
-          }
-          perf.display_wait_us +=
-              static_cast<uint64_t>(esp_timer_get_time() - wait_start);
-          ctx->releaseRenderBuffer(inflight_buf);
-          inflight_buf = nullptr;
-        }
-        perf.render_buf_wait_us +=
-            static_cast<uint64_t>(esp_timer_get_time() - render_buf_wait_start);
-
-        if (!render_buf)
-        {
-          perf.render_buf_drops++;
-          continue;
-        }
-
-        // Output to video area only (skip top/bottom overlay bars).
-        uint16_t *videoBuffer = render_buf + VIDEO_Y_OFFSET * PANEL_WIDTH;
-
+        // PPA: decode_buf[dfd.buf_idx] → panel FB video area (DMA2D)
         int64_t ppa_start = esp_timer_get_time();
+
+        xSemaphoreTake(dma2d_gate, portMAX_DELAY);
+
         bool ppa_ok = PPAPipeline::submit(
             ppa_config, ctx->decodeBufferBytes(dfd.buf_idx),
-            reinterpret_cast<uint8_t *>(videoBuffer), ctx->renderTaskHandle());
+            reinterpret_cast<uint8_t *>(videoBuffer), self);
 
-        if (!ppa_ok ||
-            !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
+        if (!ppa_ok || !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
         {
+          xSemaphoreGive(dma2d_gate);
           perf.ppa_timeouts++;
-          ctx->releaseRenderBuffer(render_buf);
+
+          uint32_t now = millis();
+          if (perf.frames >= PERF_LOG_WINDOW_FRAMES ||
+              (now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
+          {
+            flushRenderPerf(now);
+          }
           continue;
         }
-        perf.ppa_us += static_cast<uint64_t>(esp_timer_get_time() - ppa_start);
 
+        xSemaphoreGive(dma2d_gate);
+
+        perf.ppa_us +=
+            static_cast<uint64_t>(esp_timer_get_time() - ppa_start);
+
+        // Overlay (CPU writes to bar areas, does its own esp_cache_msync)
         int64_t overlay_start = esp_timer_get_time();
         OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
                                 ctx->recordingData(), ctx->batteryData(),
-                                render_buf);
+                                panel_fb);
         perf.overlay_us +=
             static_cast<uint64_t>(esp_timer_get_time() - overlay_start);
 
-        if (inflight_buf)
-        {
-          int64_t wait_start = esp_timer_get_time();
-          if (xSemaphoreTake(display_done, pdMS_TO_TICKS(120)) != pdTRUE)
-          {
-            perf.display_timeouts++;
-            ctx->releaseRenderBuffer(render_buf);
-            continue;
-          }
-          perf.display_wait_us +=
-              static_cast<uint64_t>(esp_timer_get_time() - wait_start);
-          ctx->releaseRenderBuffer(inflight_buf);
-          inflight_buf = nullptr;
-        }
+        // No draw_bitmap needed: PPA wrote via DMA2D (bypasses cache),
+        // overlay flushed bars via esp_cache_msync.
+        // Display DMA reads panel FB from PSRAM directly.
 
-        int64_t submit_start = esp_timer_get_time();
-        esp_err_t draw_ret = esp_lcd_panel_draw_bitmap(
-            panel_handle, 0, 0, PANEL_WIDTH, PANEL_HEIGHT, render_buf);
-        perf.submit_us +=
-            static_cast<uint64_t>(esp_timer_get_time() - submit_start);
-
-        if (draw_ret != ESP_OK)
-        {
-          Serial.printf("Render: draw_bitmap failed (%d)\n", static_cast<int>(draw_ret));
-          ctx->releaseRenderBuffer(render_buf);
-          continue;
-        }
-
-        inflight_buf = render_buf;
         perf.frames++;
 
         uint32_t now = millis();
@@ -225,12 +178,6 @@ namespace
         if ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
         {
           flushRenderPerf(now);
-        }
-        if (inflight_buf &&
-            xSemaphoreTake(display_done, 0) == pdTRUE)
-        {
-          ctx->releaseRenderBuffer(inflight_buf);
-          inflight_buf = nullptr;
         }
         vTaskDelay(1);
       }

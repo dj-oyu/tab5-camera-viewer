@@ -3,37 +3,16 @@
 #include "PipelineContext.h"
 #include <Arduino.h>
 #include <M5Unified.h>
-#include <freertos/semphr.h>
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 
-// Forward declaration for DPI panel event callbacks
-extern "C" esp_err_t esp_lcd_dpi_panel_register_event_callbacks(
-    esp_lcd_panel_handle_t panel,
-    const esp_lcd_dpi_panel_event_callbacks_t *cbs, void *user_ctx);
-
 namespace {
-PipelineContext *s_ctx = nullptr;
-
 class Panel_DSI_Accessor : public lgfx::Panel_DSI {
 public:
   esp_lcd_panel_handle_t getHandle() { return _disp_panel_handle; }
 };
-
-bool IRAM_ATTR on_color_trans_done(esp_lcd_panel_handle_t panel,
-                                   esp_lcd_dpi_panel_event_data_t *edata,
-                                   void *user_ctx) {
-  BaseType_t high_priority_task_awoken = pdFALSE;
-  if (s_ctx && s_ctx->displayDoneSema()) {
-    xSemaphoreGiveFromISR(s_ctx->displayDoneSema(),
-                          &high_priority_task_awoken);
-  }
-  return high_priority_task_awoken == pdTRUE;
-}
 } // namespace
 
 bool DisplayInit::init(PipelineContext &ctx) {
-  s_ctx = &ctx;
-
   auto dsi = static_cast<lgfx::Panel_DSI *>(M5.Display.getPanel());
   auto accessor = static_cast<Panel_DSI_Accessor *>(dsi);
   ctx.setPanelHandle(accessor->getHandle());
@@ -41,13 +20,8 @@ bool DisplayInit::init(PipelineContext &ctx) {
   uint16_t *panel_fb = nullptr;
   esp_lcd_dpi_panel_get_frame_buffer(ctx.panelHandle(), 1,
                                      reinterpret_cast<void **>(&panel_fb));
-  Serial.printf("Panel framebuffer: %p\n", panel_fb);
-
-  esp_lcd_dpi_panel_event_callbacks_t cbs = {
-      .on_color_trans_done = on_color_trans_done,
-  };
-  esp_lcd_dpi_panel_register_event_callbacks(ctx.panelHandle(), &cbs, nullptr);
-  Serial.println("DSI transfer callback registered");
+  ctx.setPanelFramebuffer(panel_fb);
+  Serial.printf("Panel framebuffer: %p (direct PPA target)\n", panel_fb);
 
   return true;
 }

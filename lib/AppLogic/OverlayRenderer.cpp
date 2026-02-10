@@ -99,7 +99,7 @@ namespace
     uint8_t peer_count = 0;
   };
 
-  OverlayBufferSnapshot overlay_snapshots[RENDER_BUF_COUNT];
+  OverlayBufferSnapshot overlay_snapshot;  // 単一パネルFB用
   uint32_t lastDetectionTime = 0;
   int cachedConnectionTotal = 0;
   int cachedConnectionWebrtc = 0;
@@ -175,28 +175,12 @@ namespace
 
   OverlayBufferSnapshot &snapshotFor(uint16_t *framebuffer)
   {
-    for (int i = 0; i < RENDER_BUF_COUNT; ++i)
+    if (overlay_snapshot.framebuffer != framebuffer)
     {
-      if (overlay_snapshots[i].framebuffer == framebuffer)
-      {
-        return overlay_snapshots[i];
-      }
+      overlay_snapshot = {};
+      overlay_snapshot.framebuffer = framebuffer;
     }
-
-    for (int i = 0; i < RENDER_BUF_COUNT; ++i)
-    {
-      if (overlay_snapshots[i].framebuffer == nullptr)
-      {
-        overlay_snapshots[i] = {};
-        overlay_snapshots[i].framebuffer = framebuffer;
-        return overlay_snapshots[i];
-      }
-    }
-
-    // Should not happen with RENDER_BUF_COUNT framebuffers, fallback to slot 0.
-    overlay_snapshots[0] = {};
-    overlay_snapshots[0].framebuffer = framebuffer;
-    return overlay_snapshots[0];
+    return overlay_snapshot;
   }
 
   // Calculate Y position for a row within a tile
