@@ -6,6 +6,13 @@
 #include "RecordingData.h"
 #include <Arduino.h>
 #include <M5GFX.h>
+#include <WiFi.h>
+#ifdef TAILSCALE_AUTH_KEY
+#include "TailscaleTask.h"
+extern "C" {
+#include "microlink.h"
+}
+#endif
 #include <cstring>
 #include <esp_cache.h>
 
@@ -87,10 +94,9 @@ namespace
     RecordingState rec_state = RecordingState::Idle;
     int rec_duration_sec = -1;
     bool rec_blink = true;
-    int batt_percent = -1;
-    bool batt_charging = false;
-    int batt_current_ma = 0;
-    int batt_voltage_mv = 0;
+    int wifi_rssi = 0;
+    bool vpn_connected = false;
+    uint8_t peer_count = 0;
   };
 
   OverlayBufferSnapshot overlay_snapshots[RENDER_BUF_COUNT];
@@ -101,11 +107,15 @@ namespace
   ConnectionState cachedConnectionState = ConnectionState::Connecting;
   int cachedConnectionHttpCode = 0;
 
-  // Battery state cache
+  // Battery state cache (for status tile icon)
   int cachedBattPercent = -1;
   bool cachedBattCharging = false;
-  int cachedBattCurrentMa = 0;
-  int cachedBattVoltageMv = 0;
+
+  // Network state cache
+  int cachedWifiRssi = 0;
+  bool cachedVpnConnected = false;
+  char cachedVpnIp[16] = "";
+  uint8_t cachedPeerCount = 0;
 
   // Recording state cache
   RecordingState cachedRecordingState = RecordingState::Idle;
@@ -353,26 +363,37 @@ namespace
     tileSprite.printf("MJP:%d", cachedConnectionMjpeg);
   }
 
-  // Render debug tile (Right bar, Tile 1) - battery debug info
+  // Render debug tile (Right bar, Tile 1) - network status
   void renderDebugTile()
   {
     tileSprite.fillSprite(BG_COLOR);
     tileSprite.setTextSize(2);
-    tileSprite.setTextColor(TEXT_COLOR);
+
+    // Row 0: WiFi RSSI
     tileSprite.setCursor(4, TILE_PADDING);
-    tileSprite.printf("BAT:%d%%", cachedBattPercent);
+    int rssi = cachedWifiRssi;
+    uint16_t rssiColor = (rssi > -50) ? OK_GREEN : (rssi > -70) ? WARN_YELLOW : ERROR_COLOR;
+    tileSprite.setTextColor(rssiColor);
+    tileSprite.printf("WiFi %ddB", rssi);
 
+    // Row 1: VPN status
     tileSprite.setCursor(4, TILE_PADDING + ROW_HEIGHT + ROW_GAP);
-    tileSprite.printf("%d.%02dV",
-                      cachedBattVoltageMv / 1000,
-                      (cachedBattVoltageMv % 1000) / 10);
+    tileSprite.setTextColor(cachedVpnConnected ? OK_GREEN : WARN_YELLOW);
+    tileSprite.print(cachedVpnConnected ? "VPN:ON" : "VPN:OFF");
 
+    // Row 2: VPN IP
     tileSprite.setCursor(4, TILE_PADDING + (ROW_HEIGHT + ROW_GAP) * 2);
-    tileSprite.printf("%dmA", cachedBattCurrentMa);
+    tileSprite.setTextColor(TEXT_COLOR);
+    if (cachedVpnIp[0]) {
+      tileSprite.print(cachedVpnIp);
+    } else {
+      tileSprite.print("--");
+    }
 
+    // Row 3: Peer count
     tileSprite.setCursor(4, TILE_PADDING + (ROW_HEIGHT + ROW_GAP) * 3);
-    tileSprite.setTextColor(cachedBattCharging ? OK_GREEN : WARN_YELLOW);
-    tileSprite.print(cachedBattCharging ? "CHRG" : "DCHR");
+    tileSprite.setTextColor(TEXT_COLOR);
+    tileSprite.printf("Peers:%d", cachedPeerCount);
   }
 
   // Render recording tile (Right bar, Tile 2) - Button design
@@ -622,19 +643,32 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     }
   }
 
-  // Read battery data
-  int battPercent = 0;
-  bool battCharging = false;
-  int battCurrentMa = 0;
-  int battVoltageMv = 0;
-  if (batteryData.tryRead(battPercent, battCharging, battCurrentMa,
-                          battVoltageMv))
+  // Read battery data (for status tile icon)
   {
-    cachedBattPercent = battPercent;
-    cachedBattCharging = battCharging;
-    cachedBattCurrentMa = battCurrentMa;
-    cachedBattVoltageMv = battVoltageMv;
+    int battPct = 0;
+    bool battChg = false;
+    int battMa = 0, battMv = 0;
+    if (batteryData.tryRead(battPct, battChg, battMa, battMv)) {
+      cachedBattPercent = battPct;
+      cachedBattCharging = battChg;
+    }
   }
+
+  // Read network status
+  cachedWifiRssi = WiFi.RSSI();
+#ifdef TAILSCALE_AUTH_KEY
+  cachedVpnConnected = TailscaleTask::isConnected();
+  const char *ip = TailscaleTask::vpnIpStr();
+  if (ip && ip[0]) {
+    strncpy(cachedVpnIp, ip, sizeof(cachedVpnIp) - 1);
+    cachedVpnIp[sizeof(cachedVpnIp) - 1] = '\0';
+  }
+  cachedPeerCount = TailscaleTask::peerCount();
+#else
+  cachedVpnConnected = false;
+  cachedVpnIp[0] = '\0';
+  cachedPeerCount = 0;
+#endif
 
   // Read recording data
   RecordingState recState = recordingData.getState();
@@ -665,11 +699,10 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
                       cachedConnectionMjpeg != snapshot.conn_mjpeg ||
                       cachedConnectionState != snapshot.conn_state ||
                       cachedConnectionHttpCode != snapshot.conn_http_code);
-  bool battChanged = (cachedBattPercent != snapshot.batt_percent ||
-                      cachedBattCharging != snapshot.batt_charging ||
-                      cachedBattCurrentMa != snapshot.batt_current_ma ||
-                      cachedBattVoltageMv != snapshot.batt_voltage_mv);
-  bool statusChanged = connChanged || battChanged;
+  bool netChanged = (cachedWifiRssi != snapshot.wifi_rssi ||
+                     cachedVpnConnected != snapshot.vpn_connected ||
+                     cachedPeerCount != snapshot.peer_count);
+  bool statusChanged = connChanged || netChanged;
 
   const int recDurationSec = static_cast<int>(recDuration);
   bool recChanged =
@@ -685,7 +718,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     copyTileToBar(topBar, 0);
   }
 
-  if (battChanged)
+  if (netChanged)
   {
     renderDebugTile();
     copyTileToBar(topBar, 1);
@@ -697,7 +730,7 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     copyTileToBar(topBar, 2);
   }
 
-  if (statusChanged || battChanged || recChanged)
+  if (statusChanged || netChanged || recChanged)
   {
     esp_cache_msync(topBar, BAR_BYTES, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     snapshot.conn_total = cachedConnectionTotal;
@@ -705,10 +738,9 @@ void OverlayRenderer::render(DetectionData &detectionData, ConnectionData &conne
     snapshot.conn_mjpeg = cachedConnectionMjpeg;
     snapshot.conn_state = cachedConnectionState;
     snapshot.conn_http_code = cachedConnectionHttpCode;
-    snapshot.batt_percent = cachedBattPercent;
-    snapshot.batt_charging = cachedBattCharging;
-    snapshot.batt_current_ma = cachedBattCurrentMa;
-    snapshot.batt_voltage_mv = cachedBattVoltageMv;
+    snapshot.wifi_rssi = cachedWifiRssi;
+    snapshot.vpn_connected = cachedVpnConnected;
+    snapshot.peer_count = cachedPeerCount;
     snapshot.rec_state = recState;
     snapshot.rec_duration_sec = recDurationSec;
     snapshot.rec_blink = recordingBlinkOn;
