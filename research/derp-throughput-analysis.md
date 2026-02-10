@@ -191,14 +191,88 @@ WG overhead ≈ 92 bytes/packet
 | DERP帯域上限の調査・緩和 | 10-15? | 高 | Tailscale側の制約 |
 | VPNなし直接HTTP | 30+ | 低 | セキュリティ低下 |
 
+## Window Scaling の不安定性と HW 限界
+
+### 発生した問題
+
+`TCP_WND=524280` + `CONFIG_LWIP_WND_SCALE=y` (shift=3) でデバイスが不安定化。
+ストリーミング中にデバイスが再起動する事象が発生した。
+
+### 原因の推定
+
+| 要因 | 詳細 |
+|------|------|
+| **pbuf メモリ圧迫** | TCP_WND=512KB 分の受信バッファを lwIP が確保しようとする。SPIRAM上のpbufは遅延が大きく、SDIO DMA との競合が発生しうる |
+| **RECVMBOX_SIZE=128** | tcpip スレッドの受信メールボックスを128に拡大。メールボックスあふれ時の挙動が不安定 |
+| **SPIRAM_TRY_ALLOCATE_WIFI_LWIP** | WiFi/lwIP バッファを SPIRAM に配置。SDIO ドライバが内部SRAM DMA を前提としている場合に問題 |
+| **TCP再送の爆発** | 512KB ウィンドウで大量パケットロス時、再送キューが巨大化 |
+
+### 安定動作が確認済みの設定
+
+```ini
+# 現在の保守的設定 (安定動作確認済み)
+CONFIG_LWIP_TCP_WND_DEFAULT=65534    # u16_t上限、Window Scaling不要
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32     # ESP-IDF標準値
+# CONFIG_LWIP_WND_SCALE is not set
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is not set
+FETCH_TCP_RCVBUF_BYTES=64*1024
+```
+
+### 次回チューニング時のガイドライン
+
+Window Scaling を再度試す場合は、以下の段階的アプローチで:
+
+#### Step 1: SPIRAM pbuf のみ有効化 (Window Scaling なし)
+
+```ini
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_LWIP_TCP_WND_DEFAULT=65534    # 変更なし
+# CONFIG_LWIP_WND_SCALE is not set
+```
+
+SPIRAM pbuf だけで安定するか確認。これが不安定なら Window Scaling 以前の問題。
+
+#### Step 2: 控えめな Window Scaling (128KB)
+
+```ini
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_LWIP_TCP_WND_DEFAULT=131064   # 65532 << 1 (shift=1)
+CONFIG_LWIP_WND_SCALE=y
+CONFIG_LWIP_TCP_RCV_SCALE=1          # 最小のshift
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64     # 段階的に増加
+FETCH_TCP_RCVBUF_BYTES=128*1024
+```
+
+#### Step 3: 中間 (256KB)
+
+```ini
+CONFIG_LWIP_TCP_WND_DEFAULT=262120   # 65530 << 2 (shift=2)
+CONFIG_LWIP_TCP_RCV_SCALE=2
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+FETCH_TCP_RCVBUF_BYTES=256*1024
+```
+
+#### Step 4: 最大 (512KB) — 前回不安定だった設定
+
+```ini
+CONFIG_LWIP_TCP_WND_DEFAULT=524280   # 65535 << 3 (shift=3)
+CONFIG_LWIP_TCP_RCV_SCALE=3
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=128
+FETCH_TCP_RCVBUF_BYTES=512*1024
+```
+
+### 注意: DERP 経由では効果なし
+
+上記のチューニングは **直接接続 (STUN/DISCO成功時) で効果を発揮する前提**。
+DERP relay 経由では TCP_WND=65534 でも 524280 でもスループットは ~1.4 Mbps で同一。
+直接接続が確立できない限り、Window Scaling の効果は得られない。
+
 ## 参考: メモリ使用状況
 
-Window Scaling有効化後のヒープ状態:
+保守的設定 (TCP_WND=65534) でのヒープ状態:
 
 ```
-INTERNAL: 365,900 B free (357 KB) — 十分な余裕
-SPIRAM:   26,457,664 B free (25.8 MB) — 512KB TCP_WND でも余裕
+INTERNAL: 366,000 B free (357 KB) — 十分な余裕
+SPIRAM:   26,457,804 B free (25.8 MB)
 ```
-
-TCP_WND=524280 による SPIRAM 追加消費は無視できるレベル。
-Window Scaling設定は維持しても害はない (直接接続時に効果を発揮する可能性)。
