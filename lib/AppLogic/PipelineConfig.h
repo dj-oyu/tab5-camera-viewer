@@ -17,12 +17,12 @@ constexpr uint32_t DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2; // RGB565
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
 constexpr uint32_t LINEAR_BUF_COUNT = 3;      // トリプルバッファ
-constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 1; // Linear bufferのうち内部SRAM優先数
+constexpr uint32_t LINEAR_INTERNAL_CACHE_COUNT = 0; // 内部SRAM節約: 全てSPIRAM
 constexpr uint32_t INTERNAL_CACHE_GUARD_BYTES = 128 * 1024; // 内部SRAMを使い切らないための最低確保量
 constexpr uint32_t HEADER_BUF_SIZE = 64;      // MJPEGヘッダー解析用
 constexpr uint32_t RENDER_BUF_COUNT = 2;      // Display submit用ダブルバッファ
 constexpr uint32_t FETCH_RX_BUF_SIZE = 32768; // Fetch socket read size (internal SRAM cache)
-constexpr uint32_t FETCH_TCP_RCVBUF_BYTES = 64 * 1024;
+constexpr uint32_t FETCH_TCP_RCVBUF_BYTES = 512 * 1024; // Match TCP_WND for window scaling
 constexpr uint32_t FETCH_BLOCK_TIMEOUT_MS = 4;
 constexpr uint32_t FETCH_COALESCE_MIN_BYTES = 8192;
 constexpr uint32_t FETCH_COALESCE_WAIT_US = 1600;
@@ -34,7 +34,7 @@ constexpr bool VERIFY_FETCH_ONLY_MODE = false; // Step-1 validation: disable sid
 constexpr bool VERIFY_WIFI_DIAG_LOG = false;   // Step-3 validation: dump WiFi driver diag
 
 // Performance logging / control
-constexpr bool VERBOSE_PERF_LOG = false;        // Render/Fetch FPS periodic logs
+constexpr bool VERBOSE_PERF_LOG = true;         // Render/Fetch FPS periodic logs
 constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
 constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
 constexpr float FPS_THROTTLE_ON = 28.0f;

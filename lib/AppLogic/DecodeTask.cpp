@@ -2,15 +2,35 @@
 #include "PipelineConfig.h"
 #include "PipelineContext.h"
 #include <Arduino.h>
+#include <esp_log.h>
 #include <esp_timer.h>
 
 namespace
 {
+  // Check for JPEG EOI marker (0xFF 0xD9) near end of data.
+  // Truncated frames from MJPEG streaming lack EOI and cause
+  // "data units mismatch" errors in the HW decoder.
+  bool hasEoiMarker(const uint8_t *buf, size_t len)
+  {
+    if (len < 2) return false;
+    // Search last 16 bytes for EOI (may have trailing padding)
+    size_t search_start = (len > 16) ? len - 16 : 0;
+    for (size_t i = search_start; i < len - 1; i++)
+    {
+      if (buf[i] == 0xFF && buf[i + 1] == 0xD9) return true;
+    }
+    return false;
+  }
+
   void decodeTask(void *pvParameters)
   {
     auto *ctx = static_cast<PipelineContext *>(pvParameters);
     auto frame_queue = ctx->frameQueue();
     auto decoded_queue = ctx->decodedFrameQueue();
+
+    // Suppress noisy ESP-IDF JPEG decoder internal errors
+    // (e.g. "data units mismatch" on truncated frames)
+    esp_log_level_set("jpeg.decoder", ESP_LOG_WARN);
 
     jpeg_decoder_handle_t decoder = nullptr;
     jpeg_decode_engine_cfg_t eng_cfg = {.intr_priority = 0, .timeout_ms = 100};
@@ -28,6 +48,8 @@ namespace
 
     uint32_t perf_frames = 0;
     uint32_t perf_errors = 0;
+    uint32_t perf_truncated = 0;
+    uint32_t perf_received = 0;
     uint64_t perf_decode_us = 0;
     uint32_t perf_window_start = millis();
     FrameData fd;
@@ -36,10 +58,19 @@ namespace
     {
       if (xQueueReceive(frame_queue, &fd, pdMS_TO_TICKS(1000)) == pdTRUE)
       {
+        perf_received++;
         // Quick SOI marker check to avoid 100ms HW decoder timeout on corrupt data
         if (fd.len < 4 || fd.buf[0] != 0xFF || fd.buf[1] != 0xD8)
         {
           perf_errors++;
+          if (fd.is_linear) { ctx->releaseLinear(fd.buf); }
+          continue;
+        }
+
+        // EOI marker check: skip truncated frames that would cause HW decoder errors
+        if (!hasEoiMarker(fd.buf, fd.len))
+        {
+          perf_truncated++;
           if (fd.is_linear) { ctx->releaseLinear(fd.buf); }
           continue;
         }
@@ -83,19 +114,62 @@ namespace
             window_ms = 1;
           }
           Serial.printf(
-              "Decode Perf: fps=%.1f decode=%lluus errors=%u queues(in=%u out=%u)\n",
+              "Decode Perf: fps=%.1f decode=%lluus errors=%u truncated=%u queues(in=%u out=%u)\n",
               (1000.0f * perf_frames) / window_ms,
               static_cast<unsigned long long>(perf_decode_us / perf_frames),
-              perf_errors, uxQueueMessagesWaiting(frame_queue),
+              perf_errors, perf_truncated,
+              uxQueueMessagesWaiting(frame_queue),
               uxQueueMessagesWaiting(decoded_queue));
           perf_frames = 0;
+          perf_received = 0;
           perf_errors = 0;
+          perf_truncated = 0;
           perf_decode_us = 0;
+          perf_window_start = now;
+        }
+        // Log errors even when no frames decoded successfully
+        else if ((now - perf_window_start) >= PERF_LOG_INTERVAL_MS &&
+                 perf_frames == 0 && (perf_errors > 0 || perf_truncated > 0))
+        {
+          Serial.printf(
+              "Decode ERRORS: recv=%u errors=%u truncated=%u queues(in=%u out=%u)\n",
+              perf_received, perf_errors, perf_truncated,
+              uxQueueMessagesWaiting(frame_queue),
+              uxQueueMessagesWaiting(decoded_queue));
+          perf_received = 0;
+          perf_errors = 0;
+          perf_truncated = 0;
+          perf_window_start = now;
+        }
+        // Log idle state (no frames received at all)
+        else if ((now - perf_window_start) >= 5000 &&
+                 perf_frames == 0 && perf_received == 0)
+        {
+          Serial.printf(
+              "Decode IDLE: queues(in=%u out=%u)\n",
+              uxQueueMessagesWaiting(frame_queue),
+              uxQueueMessagesWaiting(decoded_queue));
           perf_window_start = now;
         }
       }
       else
       {
+        // xQueueReceive timed out (no frame for 1 second)
+        uint32_t now = millis();
+        if ((now - perf_window_start) >= 5000)
+        {
+          Serial.printf(
+              "Decode IDLE: recv=%u ok=%u err=%u trunc=%u queues(in=%u out=%u)\n",
+              perf_received, perf_frames, perf_errors, perf_truncated,
+              uxQueueMessagesWaiting(frame_queue),
+              uxQueueMessagesWaiting(decoded_queue));
+          perf_received = 0;
+          perf_frames = 0;
+          perf_errors = 0;
+          perf_truncated = 0;
+          perf_decode_us = 0;
+          perf_window_start = now;
+        }
         vTaskDelay(1);
       }
     }

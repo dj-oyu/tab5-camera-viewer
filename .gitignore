@@ -8,10 +8,11 @@
 sample/tab5-userdemo
 .claude/settings.local.json
 
-# Hybrid Compile (custom_sdkconfig) generated files
+# ESP-IDF build artifacts
 .dummy/
 managed_components/
 sdkconfig.*
+!sdkconfig.defaults
 *.map
 build_verbose.log
 

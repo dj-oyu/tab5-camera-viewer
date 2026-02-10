@@ -545,19 +545,16 @@ namespace
     static bool rx_buf_internal = false;
     if (!rx_buf)
     {
+      // Allocate in SPIRAM to preserve internal SRAM for SDIO DMA / lwIP pbufs.
+      // SPIRAM is fast enough (200MHz) for socket read buffering.
       rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
-          64, FETCH_RX_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-      rx_buf_internal = rx_buf != nullptr;
-      if (!rx_buf)
-      {
-        rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
-            64, FETCH_RX_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-      }
+          64, FETCH_RX_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
       if (!rx_buf)
       {
         rx_buf = static_cast<uint8_t *>(heap_caps_aligned_alloc(
             64, FETCH_RX_BUF_SIZE, MALLOC_CAP_8BIT));
       }
+      rx_buf_internal = false;
       if (!rx_buf)
       {
         Serial.printf("Failed to allocate fetch RX buffer (%lu bytes)\n",
