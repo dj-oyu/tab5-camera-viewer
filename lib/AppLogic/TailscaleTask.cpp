@@ -77,12 +77,12 @@ void tailscaleTask(void *pvParameters) {
 
   // Suppress MicroLink logs - only show errors and state transitions
   esp_log_level_set("microlink", ESP_LOG_WARN);
-  esp_log_level_set("ml_wg", ESP_LOG_WARN);
+  esp_log_level_set("ml_wg", ESP_LOG_INFO);   // Endpoint update visibility
   esp_log_level_set("ml_derp", ESP_LOG_WARN);
   esp_log_level_set("ml_conn", ESP_LOG_WARN);
-  esp_log_level_set("ml_disco", ESP_LOG_WARN);
+  esp_log_level_set("ml_disco", ESP_LOG_INFO);
   esp_log_level_set("ml_coord", ESP_LOG_WARN);
-  esp_log_level_set("ml_stun", ESP_LOG_ERROR);
+  esp_log_level_set("ml_stun", ESP_LOG_INFO);
 
 #ifdef TAILSCALE_AUTH_KEY
   Serial.printf("TS heap: internal=%lu free, total=%lu free\n",
@@ -95,8 +95,8 @@ void tailscaleTask(void *pvParameters) {
   config.auth_key = TAILSCALE_AUTH_KEY;
   config.device_name = "m5stack-tab5";
   config.enable_derp = true;
-  config.enable_stun = false;   // STUN DNS fails, not needed for DERP-only
-  config.enable_disco = false;  // DISCO causes WG handshake to non-target peers → crash
+  config.enable_stun = true;    // STUN enabled (DNS fallback + correct DERP server)
+  config.enable_disco = true;   // DISCO enabled (peer filter prevents non-target WG crash)
   config.max_peers = 4;
   config.heartbeat_interval_ms = 25000;
   config.target_hostname = "rdk-x5";  // Only add this peer to WG
