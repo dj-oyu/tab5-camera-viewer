@@ -10,6 +10,7 @@
 #include "RecordingData.h"
 #include "RecordingTask.h"
 #include "RenderTask.h"
+#include "TailscaleTask.h"
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <PPAPipeline.h>
@@ -70,8 +71,9 @@ void AppLogic::begin() {
   // Core 1: Render + Fetch + control tasks
   // Render is kept at highest priority on Core 1 to avoid starvation from network parsing.
   RenderTask::start(ctx, 6, 1);      // Core 1 - PPA + DSI submit
-  FetchTask::start(ctx, 5, 1);       // Core 1 - MJPEG stream parser
+  FetchTask::start(ctx, 5, 1);       // Core 1 - MJPEG stream parser (WiFi init here)
   DecodeTask::start(ctx, 5, 0);      // Core 0 - JPEG HW decode
+  TailscaleTask::start(ctx, 3, 0);   // Core 0 - Tailscale VPN (waits for WiFi)
   if (VERIFY_FETCH_ONLY_MODE) {
     Serial.println("Verify mode: fetch-only (Detection/Connection/Recording disabled)");
   } else {

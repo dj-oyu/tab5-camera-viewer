@@ -13,6 +13,10 @@
 #include <esp_timer.h>
 #include <lwip/sockets.h>
 
+#ifdef TAILSCALE_AUTH_KEY
+#include "TailscaleTask.h"
+#endif
+
 namespace
 {
 
@@ -523,6 +527,16 @@ namespace
     auto frame_queue = ctx->frameQueue();
     auto linear_free_queue = ctx->linearFreeQueue();
     initWiFi();
+
+#ifdef TAILSCALE_AUTH_KEY
+    Serial.println("Fetch: Waiting for Tailscale VPN...");
+    EventGroupHandle_t vpn_eg = TailscaleTask::eventGroup();
+    if (vpn_eg) {
+      xEventGroupWaitBits(vpn_eg, VPN_CONNECTED_BIT, pdFALSE, pdTRUE,
+                          portMAX_DELAY);
+    }
+    Serial.println("Fetch: VPN ready, starting stream");
+#endif
 
 #ifdef MJPEG_URL
     HTTPClient http;
