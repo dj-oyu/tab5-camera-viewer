@@ -1,9 +1,8 @@
 # TCP/IP optimization for MJPEG streaming
-# TCP_WND=8192 is the proven sweet spot: 30fps at ~13 Mbps (5ms RTT)
-# TCP_WND=16384+ caused SDIO crashes (internal SRAM exhaustion)
-# TCP_WND=65534 didn't improve FPS over WG and risks SRAM starvation
-CONFIG_LWIP_TCP_WND_DEFAULT=8192
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=8192
+# TCP_WND=8192 → 27fps (8.3Mbps), need ~9.2Mbps for 30fps
+# TCP_WND=10240 with SPIRAM_TRY_ALLOCATE: safe headroom (16384 crashed without SPIRAM alloc)
+CONFIG_LWIP_TCP_WND_DEFAULT=10240
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=10240
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 
 # Allocate WiFi/lwIP buffers in SPIRAM to preserve internal SRAM for SDIO/queues
