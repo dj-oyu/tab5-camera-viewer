@@ -42,20 +42,30 @@ with open(override_header, "w") as f:
 #include_next "sdkconfig.h"
 
 
-/* Override TCP window/buffer sizes from sdkconfig.defaults */
+/* Match Hybrid Compile settings that achieved 30fps (TCP_WND=8192).
+ * TCP_WND=65534 causes internal SRAM exhaustion (65KB × 4 connections = 260KB
+ * out of ~370KB free). TCP_WND=16384+ caused SDIO crashes in Hybrid Compile.
+ * TCP_WND=8192 is the proven sweet spot: enough for 30fps (13 Mbps at 5ms RTT)
+ * without starving WiFi/SDIO queues. */
 #undef CONFIG_LWIP_TCP_WND_DEFAULT
-#define CONFIG_LWIP_TCP_WND_DEFAULT 65534
+#define CONFIG_LWIP_TCP_WND_DEFAULT 8192
 
 #undef CONFIG_LWIP_TCP_SND_BUF_DEFAULT
-#define CONFIG_LWIP_TCP_SND_BUF_DEFAULT 65534
+#define CONFIG_LWIP_TCP_SND_BUF_DEFAULT 8192
 
 #undef CONFIG_LWIP_TCP_RECVMBOX_SIZE
 #define CONFIG_LWIP_TCP_RECVMBOX_SIZE 32
 
+/* Enable SPIRAM allocation for WiFi/lwIP buffers to reduce internal SRAM pressure.
+ * This matches the Hybrid Compile config that achieved 30fps. */
+#ifndef CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP
+#define CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP 1
+#endif
+
 #endif /* _LWIP_OVERRIDE_SDKCONFIG_H_ */
 """)
 env.Prepend(CPPPATH=[override_dir])
-print(f"lwIP TCP override: TCP_WND=65534 (via {override_dir})")
+print(f"lwIP TCP override: TCP_WND=8192+SPIRAM_WIFI (via {override_dir})")
 
 # Try to load .env file
 env_file = os.path.join(env.get("PROJECT_DIR"), ".env")

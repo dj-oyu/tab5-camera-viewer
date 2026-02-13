@@ -1,9 +1,13 @@
-# TCP/IP optimization for MJPEG streaming via WireGuard tunnel
-# TCP_WND=65534 is the max without window scaling (u16_t limit)
-# DERP relay caps throughput at ~1.4 Mbps regardless of window size
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+# TCP/IP optimization for MJPEG streaming
+# TCP_WND=8192 is the proven sweet spot: 30fps at ~13 Mbps (5ms RTT)
+# TCP_WND=16384+ caused SDIO crashes (internal SRAM exhaustion)
+# TCP_WND=65534 didn't improve FPS over WG and risks SRAM starvation
+CONFIG_LWIP_TCP_WND_DEFAULT=8192
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=8192
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# Allocate WiFi/lwIP buffers in SPIRAM to preserve internal SRAM for SDIO/queues
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 # Bootloader: minimize size to fit within 0x2000-0x8000 (24KB)
 # Source-compiled bootloader exceeds 24KB with default log level
