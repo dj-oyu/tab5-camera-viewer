@@ -197,6 +197,61 @@ TCP_WND=16384 テスト時に以下の設定が反映されなかった:
 - [x] `docs/pipeline-architecture.md`, `docs/task-interactions.md` を現状コードに同期
   - render_buf 廃止・PPA直接FB書込み・セマフォベース API を反映
 
+## NAT Traversal 改善 (improve/nat-traversal)
+
+### 背景
+
+iPhoneテザリング（4G CGNAT）経由でDERP接続にフォールバックし、MJPEGストリームが3-4fpsに低下。
+スマホブラウザから同じTailscale経由で同カメラに接続すると30fps出る。
+
+**原因分析**:
+- 4G CGNATは Symmetric NAT (Endpoint-Dependent Mapping)
+- MicroLinkの単純なSTUN+DISCOではSymmetric NATのホールパンチが困難
+- DERP経路はTLS二重暗号化+Serial LOGIブロッキングで低速（ログは修正済み）
+- ただしCone NAT側（rdk-x5=自宅回線）から見れば、ESP32が先にパケットを送ればEDF応答は通るはず
+- **endpoints: 0 の可能性** — coordinationが返すEndpointsが空だとプローブ先がない
+
+### タスクリスト（実装コスト順）
+
+#### Phase 0: 診断ログ追加（実装: 小、効果: 高）✅
+- [x] DERP/Direct判定の診断ログ
+  - `TailscaleTask.cpp` 30秒診断に peer/endpoint/STUN/NAT詳細を追加
+  - 各ピアの `endpoint_count`, `using_derp`, `latency_ms`, 全エンドポイントIP:port
+  - STUN公開IP:port、NATタイプ（cone/symmetric）、ポートdelta
+  - `microlink_get_stun_info()` 公開API追加
+
+#### Phase 1: DERPパス最適化（実装: 小、効果: 中〜高）✅
+- [x] `ml_derp` TLS write関数のデバッグLOGIを `LOGD` に降格（6箇所）
+- [x] `ml_wg` DERP output callback の per-packet LOGI を LOGD に降格（2箇所）
+- [x] `ml_derp` SEND_PACKET/recv の per-packet LOGI を LOGD に降格（4箇所）
+- [x] TailscaleTask: 全MicroLinkタグを `ESP_LOG_WARN` に統一
+
+#### Phase 2: NATタイプ検出（実装: 小、効果: 診断）✅
+- [x] `microlink_stun_detect_nat_type()` — 2 STUNサーバにプローブしポート比較
+  - `microlink_nat_type_t` enum追加 (UNKNOWN/NONE/CONE/SYMMETRIC)
+  - `stun.port_delta` でポート割り当て傾向を記録
+  - 接続初期化時に自動実行（`FETCHING_PEERS` ステート）
+  - `microlink_get_stun_info()` で外部から参照可能
+
+#### Phase 3: CallMeMaybe処理の実装（実装: 中、効果: 高）✅
+- [x] CallMeMaybeペイロードからIPv4エンドポイントをパース
+  - 18B/entry (16B IPv4-mapped-IPv6 + 2B port BE) フォーマット対応
+- [x] 受信時に全候補エンドポイントへDISCO ping一斉送信
+  - `pending_probes` に登録してPONG応答でホールパンチ確認
+
+#### Phase 4: ポート予測（実装: 中、効果: 中）✅
+- [x] Symmetric NAT + DERP使用中に自動発動
+  - `stun.port_delta` ベースで ±8 × delta 範囲にスプレープローブ
+  - `DISCO_TX_POOL_SIZE` 8→24 に拡張
+- [x] 最大16本の追加プローブ/ラウンド
+
+#### Phase 5: DERP高速化（実装: 中、効果: DERP時のみ）✅
+- [x] `DERP_READ_TIMEOUT_MS` 10ms → 1ms に短縮
+- [x] TailscaleTask delay: VPN active時 10ms → 2ms に短縮
+- [ ] DERP TLS write/readのバッチ化（未実装・将来の改善候補）
+
+---
+
 ## 次のタスク
 
 ### 内部 SRAM メモリ最適化

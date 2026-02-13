@@ -6,6 +6,7 @@
 #include <esp_log.h>
 #include <esp_sntp.h>
 #include <esp_heap_caps.h>
+#include <lwip/inet.h>
 #include <time.h>
 
 extern "C" {
@@ -60,13 +61,13 @@ void tailscaleTask(void *pvParameters) {
   for (int retry = 0; retry < 20; retry++) {
     time_t now = time(nullptr);
     localtime_r(&now, &timeinfo);
-    if (timeinfo.tm_year > (2026 - 1900)) {
+    if (timeinfo.tm_year >= (2026 - 1900)) {
       break;
     }
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 
-  if (timeinfo.tm_year > (2026 - 1900)) {
+  if (timeinfo.tm_year >= (2026 - 1900)) {
     time_t now = time(nullptr);
     Serial.printf("TailscaleTask: NTP synced, time=%ld (%d-%02d-%02d)\n",
                   (long)now, timeinfo.tm_year + 1900,
@@ -77,12 +78,12 @@ void tailscaleTask(void *pvParameters) {
 
   // Suppress MicroLink logs - only show errors and state transitions
   esp_log_level_set("microlink", ESP_LOG_WARN);
-  esp_log_level_set("ml_wg", ESP_LOG_INFO);   // Endpoint update visibility
+  esp_log_level_set("ml_wg", ESP_LOG_WARN);
   esp_log_level_set("ml_derp", ESP_LOG_WARN);
   esp_log_level_set("ml_conn", ESP_LOG_WARN);
-  esp_log_level_set("ml_disco", ESP_LOG_INFO);
+  esp_log_level_set("ml_disco", ESP_LOG_INFO);   // DEBUG: NAT traversal investigation
   esp_log_level_set("ml_coord", ESP_LOG_WARN);
-  esp_log_level_set("ml_stun", ESP_LOG_INFO);
+  esp_log_level_set("ml_stun", ESP_LOG_INFO);    // DEBUG: NAT traversal investigation
 
 #ifdef TAILSCALE_AUTH_KEY
   Serial.printf("TS heap: internal=%lu free, total=%lu free\n",
@@ -149,6 +150,49 @@ void tailscaleTask(void *pvParameters) {
                     microlink_state_to_str(state), s_peerCount, anyUp, connected,
                     vpnBitSet, (unsigned long)stackHWM,
                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+
+      // Per-peer NAT traversal diagnostics (target peer only to avoid serial corruption)
+      for (uint8_t i = 0; i < count; i++) {
+        const auto &p = peers[i];
+        // Only show full details for target peer
+        if (strncmp(p.hostname, "rdk-x5", 6) != 0) continue;
+        Serial.printf("  target[%d] %s: eps=%d derp=%d lat=%lums bestEp=%d lastSeen=%lums ago\n",
+                      i, p.hostname, p.endpoint_count, p.using_derp,
+                      (unsigned long)p.latency_ms, p.best_endpoint_idx,
+                      p.last_seen_ms ? (unsigned long)(now - p.last_seen_ms) : 0UL);
+        for (uint8_t ep = 0; ep < p.endpoint_count; ep++) {
+          uint32_t hip = ntohl(p.endpoints[ep].ip);
+          Serial.printf("    ep[%d] %lu.%lu.%lu.%lu:%u%s\n",
+                        ep,
+                        (unsigned long)((hip >> 24) & 0xFF),
+                        (unsigned long)((hip >> 16) & 0xFF),
+                        (unsigned long)((hip >> 8) & 0xFF),
+                        (unsigned long)(hip & 0xFF),
+                        p.endpoints[ep].port,
+                        p.endpoints[ep].is_derp ? " (DERP)" : "");
+        }
+      }
+
+      // STUN / NAT diagnostics
+      microlink_stun_info_t stun;
+      if (microlink_get_stun_info(s_ml, &stun) == ESP_OK && stun.public_ip != 0) {
+        static const char *nat_names[] = {"unknown", "none", "cone", "symmetric"};
+        const char *nat_str = (stun.nat_type < 4) ? nat_names[stun.nat_type] : "?";
+        Serial.printf("  STUN: %lu.%lu.%lu.%lu:%u alt:%u delta=%d NAT=%s\n",
+                      (unsigned long)((stun.public_ip >> 24) & 0xFF),
+                      (unsigned long)((stun.public_ip >> 16) & 0xFF),
+                      (unsigned long)((stun.public_ip >> 8) & 0xFF),
+                      (unsigned long)(stun.public_ip & 0xFF),
+                      stun.public_port, stun.public_port_alt,
+                      stun.port_delta, nat_str);
+      }
+      microlink_stats_t stats;
+      if (microlink_get_stats(s_ml, &stats) == ESP_OK) {
+        Serial.printf("  stats: derp_relayed=%lu direct=%lu\n",
+                      (unsigned long)stats.derp_packets_relayed,
+                      (unsigned long)stats.direct_packets_sent);
+      }
+
       lastDiagMs = now;
     }
 
@@ -168,7 +212,8 @@ void tailscaleTask(void *pvParameters) {
       vpnBitSet = false;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // Faster polling when VPN active (DERP streaming needs low latency)
+    vTaskDelay(pdMS_TO_TICKS(vpnBitSet ? 2 : 10));
   }
 #else
   Serial.println("TailscaleTask: TAILSCALE_AUTH_KEY not defined, task idle");
