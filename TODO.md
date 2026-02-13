@@ -291,11 +291,27 @@ WireGuard VPN（MicroLink）経由で MJPEG ストリームを受信すると 7-
 4. **WGパケットオーバーヘッド** — 各TCPセグメントがWGヘッダ(60B)で包まれ、
    MTU 1420に収めるため内側MSSが小さくなる
 
+#### TCP_WND 二重コンパイル問題（2026-02-13 解決）
+
+**問題**: PlatformIO の `framework = arduino, espidf` 構成では lwIP が2回コンパイルされる:
+1. **SCons** (.o ファイル) — プリビルト `sdkconfig.h` を使用 → `TCP_WND=5760`
+2. **ESP-IDF CMake** (liblwip.a) — プロジェクト `sdkconfig.defaults` を使用 → `TCP_WND=65534`
+リンク時に SCons .o が優先 → 実効 `TCP_WND=5760`
+
+**修正**: `env_loader.py` で `#include_next` ラッパー方式を採用:
+- `.pio/build/<env>/lwip_override/sdkconfig.h` を自動生成
+- プリビルト sdkconfig.h をチェインしつつ、lwIP TCP 値のみ `#undef`/`#define` で上書き
+- CPPPATH にプリペンドして全 SCons コンパイルに適用
+- `#warning` 診断で lwIP/wireguard/mbedtls 等すべての SCons コンパイルに適用確認済み
+
+**結果**: TCP_WND=65534 が SCons lwIP に適用されたが、FPS は 7-10fps のまま変化なし。
+→ TCP_WND はボトルネックではなかった。ただし設定の不整合修正として価値あり。
+
 #### 計測すべき項目
 
 - [ ] `VERBOSE_PERF_LOG=true` にして Fetch Perf の mbps を確認（WG経由 vs 直接WiFi）
 - [ ] WG暗号化スループット単体計測（iperf等でWGトンネル内TCP帯域を計測）
-- [ ] `TCP_WND` の実効値がWGトンネル内でどうなっているか（`sdkconfig.defaults` では65534設定済み）
+- [x] `TCP_WND` の実効値がWGトンネル内でどうなっているか → `#include_next` ラッパーで65534に修正済み（FPS変化なし）
 - [ ] WGなし（直接WiFi）→ WGあり（直接パス）のスループット比を定量化
 
 ## クリーンアップ（動作確認後）
