@@ -94,4 +94,7 @@ void AppLogic::update() {
       g_ctx->recordingData().requestToggle();
     }
   }
+
+  // Yield to IDLE task on Core 1 to prevent task WDT timeout
+  vTaskDelay(1);
 }

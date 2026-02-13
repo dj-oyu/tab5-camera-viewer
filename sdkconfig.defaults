@@ -14,5 +14,29 @@ CONFIG_BOOTLOADER_LOG_LEVEL=0
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
+# Partition table offset (bootloader exceeds 24KB, needs 0x9000 instead of default 0x8000)
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+
+# PSRAM (Tab5 = 16MB PSRAM, HEX mode 200MHz)
+# BOOT_INIT=n: Arduino framework / M5Unified handles PSRAM init (matches precompiled libs)
+# IDF_EXPERIMENTAL_FEATURES required for 200MHz SPIRAM on ESP32-P4
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
 # Extend interrupt WDT timeout for DMA2D serialization
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+
+# Arduino framework requires 1000Hz tick rate
+CONFIG_FREERTOS_HZ=1000
+
+# Arduino auto-start (provides app_main with setup/loop)
+CONFIG_AUTOSTART_ARDUINO=y
+
+# mbedTLS PSK support (required by NetworkClientSecure ssl_client.cpp)
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK=y
