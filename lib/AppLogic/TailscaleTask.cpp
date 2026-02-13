@@ -161,7 +161,7 @@ void tailscaleTask(void *pvParameters) {
                       (unsigned long)p.latency_ms, p.best_endpoint_idx,
                       p.last_seen_ms ? (unsigned long)(now - p.last_seen_ms) : 0UL);
         for (uint8_t ep = 0; ep < p.endpoint_count; ep++) {
-          uint32_t hip = ntohl(p.endpoints[ep].ip);
+          uint32_t hip = ntohl(p.endpoints[ep].addr.ip4);
           Serial.printf("    ep[%d] %lu.%lu.%lu.%lu:%u%s\n",
                         ep,
                         (unsigned long)((hip >> 24) & 0xFF),
