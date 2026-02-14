@@ -1,9 +1,12 @@
-# TCP/IP optimization for MJPEG streaming via WireGuard tunnel
-# TCP_WND=65534 is the max without window scaling (u16_t limit)
-# DERP relay caps throughput at ~1.4 Mbps regardless of window size
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+# TCP/IP optimization for MJPEG streaming
+# TCP_WND=8192 → 27fps (8.3Mbps), need ~9.2Mbps for 30fps
+# TCP_WND=10240 with SPIRAM_TRY_ALLOCATE: safe headroom (16384 crashed without SPIRAM alloc)
+CONFIG_LWIP_TCP_WND_DEFAULT=10240
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=10240
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+
+# Allocate WiFi/lwIP buffers in SPIRAM to preserve internal SRAM for SDIO/queues
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 # Bootloader: minimize size to fit within 0x2000-0x8000 (24KB)
 # Source-compiled bootloader exceeds 24KB with default log level
@@ -14,5 +17,29 @@ CONFIG_BOOTLOADER_LOG_LEVEL=0
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
+# Partition table offset (bootloader exceeds 24KB, needs 0x9000 instead of default 0x8000)
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+
+# PSRAM (Tab5 = 16MB PSRAM, HEX mode 200MHz)
+# BOOT_INIT=n: Arduino framework / M5Unified handles PSRAM init (matches precompiled libs)
+# IDF_EXPERIMENTAL_FEATURES required for 200MHz SPIRAM on ESP32-P4
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+
 # Extend interrupt WDT timeout for DMA2D serialization
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+
+# Arduino framework requires 1000Hz tick rate
+CONFIG_FREERTOS_HZ=1000
+
+# Arduino auto-start (provides app_main with setup/loop)
+CONFIG_AUTOSTART_ARDUINO=y
+
+# mbedTLS PSK support (required by NetworkClientSecure ssl_client.cpp)
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK=y
