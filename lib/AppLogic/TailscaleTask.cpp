@@ -177,14 +177,16 @@ void tailscaleTask(void *pvParameters) {
       microlink_stun_info_t stun;
       if (microlink_get_stun_info(s_ml, &stun) == ESP_OK && stun.public_ip != 0) {
         static const char *nat_names[] = {"unknown", "none", "cone", "symmetric"};
+        static const char *alloc_names[] = {"unknown", "seq", "random"};
         const char *nat_str = (stun.nat_type < 4) ? nat_names[stun.nat_type] : "?";
-        Serial.printf("  STUN: %lu.%lu.%lu.%lu:%u alt:%u delta=%d NAT=%s\n",
+        const char *alloc_str = (stun.alloc_type < 3) ? alloc_names[stun.alloc_type] : "?";
+        Serial.printf("  STUN: %lu.%lu.%lu.%lu:%u alt:%u delta=%d NAT=%s alloc=%s\n",
                       (unsigned long)((stun.public_ip >> 24) & 0xFF),
                       (unsigned long)((stun.public_ip >> 16) & 0xFF),
                       (unsigned long)((stun.public_ip >> 8) & 0xFF),
                       (unsigned long)(stun.public_ip & 0xFF),
                       stun.public_port, stun.public_port_alt,
-                      stun.port_delta, nat_str);
+                      stun.port_delta, nat_str, alloc_str);
       }
       microlink_stats_t stats;
       if (microlink_get_stats(s_ml, &stats) == ESP_OK) {
