@@ -78,12 +78,13 @@ bool wireguardif_is_wireguard_packet(const uint8_t *data, size_t len) {
 
 static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
 	// Don't overwrite a valid endpoint with 0.0.0.0 (DERP-injected packets have no real source)
-	// This bug was causing DERP routing to break after receiving the first packet
 	if (ip_addr_isany(addr)) {
-		printf("[WG] update_peer_addr: skipping DERP (0.0.0.0)\n");
 		return;  // Skip updating endpoint for DERP packets
 	}
-	printf("[WG] update_peer_addr: %s:%u\n", ipaddr_ntoa(addr), port);
+	// Only log when endpoint actually changes
+	if (!ip_addr_eq(&peer->ip, addr) || peer->port != port) {
+		printf("[WG] update_peer_addr: %s:%u\n", ipaddr_ntoa(addr), port);
+	}
 	peer->ip = *addr;
 	peer->port = port;
 }
