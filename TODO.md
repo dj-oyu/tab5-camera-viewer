@@ -268,6 +268,52 @@ render_buf 廃止で ~3.5MB SPIRAM が空いた。内部 SRAM も最適化して
    - ソケット read バッファサイズと内部 SRAM 消費のトレードオフ
 4. **ヒープ使用量の計測**: `heap_caps_get_free_size()` で起動後の空き領域を定期ログ
 
+### WireGuard トンネル経由の FPS 低下調査
+
+WireGuard VPN（MicroLink）経由で MJPEG ストリームを受信すると 7-10fps に制限される。
+直接WiFi（VPNなし）では 30fps 出ている。
+
+#### 調査結果（2026-02-13）
+
+**DERP→Direct切り替えは正常に動作している**:
+- `wireguardif.c` の `update_peer_addr()` が、DISCO PCBで受信した直接WGパケットの
+  ソースアドレスから自動的に `peer->ip/port` を更新
+- `stats: derp_relayed=31`（4分間）= keepaliveのみ。データトラフィックは直接パス経由
+- `Decode fps=7-10` ≈ 4-5Mbps → DERP上限(1.4Mbps≈2.5fps)を大幅超過 = 直接パス動作中
+
+**ボトルネック候補**:
+1. **WireGuard暗号化のCPU負荷** — ChaCha20-Poly1305がソフトウェア実装（ESP32-P4にはAES-NIのような
+   ハードウェアアクセラレーションなし）。暗号化/復号のスループットを計測すべき
+2. **TCP over WGのウィンドウ制御** — 内側TCP（HTTP MJPEG）のウィンドウが `TCP_WND=65534` でも、
+   WGトンネル上の実効RTTが増加するとスループットが低下。`TCP_WND / effective_RTT` が上限
+3. **SDIO WiFiスループット制限** — ESP32-C6コプロセッサ経由のWiFi + WG暗号化オーバーヘッドで
+   実効スループットが低下
+4. **WGパケットオーバーヘッド** — 各TCPセグメントがWGヘッダ(60B)で包まれ、
+   MTU 1420に収めるため内側MSSが小さくなる
+
+#### TCP_WND 二重コンパイル問題（2026-02-13 解決）
+
+**問題**: PlatformIO の `framework = arduino, espidf` 構成では lwIP が2回コンパイルされる:
+1. **SCons** (.o ファイル) — プリビルト `sdkconfig.h` を使用 → `TCP_WND=5760`
+2. **ESP-IDF CMake** (liblwip.a) — プロジェクト `sdkconfig.defaults` を使用 → `TCP_WND=65534`
+リンク時に SCons .o が優先 → 実効 `TCP_WND=5760`
+
+**修正**: `env_loader.py` で `#include_next` ラッパー方式を採用:
+- `.pio/build/<env>/lwip_override/sdkconfig.h` を自動生成
+- プリビルト sdkconfig.h をチェインしつつ、lwIP TCP 値のみ `#undef`/`#define` で上書き
+- CPPPATH にプリペンドして全 SCons コンパイルに適用
+- `#warning` 診断で lwIP/wireguard/mbedtls 等すべての SCons コンパイルに適用確認済み
+
+**結果**: TCP_WND=65534 が SCons lwIP に適用されたが、FPS は 7-10fps のまま変化なし。
+→ TCP_WND はボトルネックではなかった。ただし設定の不整合修正として価値あり。
+
+#### 計測すべき項目
+
+- [ ] `VERBOSE_PERF_LOG=true` にして Fetch Perf の mbps を確認（WG経由 vs 直接WiFi）
+- [ ] WG暗号化スループット単体計測（iperf等でWGトンネル内TCP帯域を計測）
+- [x] `TCP_WND` の実効値がWGトンネル内でどうなっているか → `#include_next` ラッパーで65534に修正済み（FPS変化なし）
+- [ ] WGなし（直接WiFi）→ WGあり（直接パス）のスループット比を定量化
+
 ## クリーンアップ（動作確認後）
 
 - [x] 充電検出が安定したら稲妻マーク表示を有効化 → 既に有効（INA226電流符号で判定）

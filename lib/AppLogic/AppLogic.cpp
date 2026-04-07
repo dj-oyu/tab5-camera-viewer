@@ -95,6 +95,6 @@ void AppLogic::update() {
     }
   }
 
-  // Yield to prevent task watchdog on CPU 1
-  vTaskDelay(pdMS_TO_TICKS(10));
+  // Yield to IDLE task on Core 1 to prevent task WDT timeout
+  vTaskDelay(1);
 }
