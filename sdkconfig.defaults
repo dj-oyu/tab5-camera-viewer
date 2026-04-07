@@ -5,14 +5,62 @@ CONFIG_LWIP_TCP_WND_DEFAULT=65534
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 
-# Bootloader: minimize size to fit within 0x2000-0x8000 (24KB)
-# Source-compiled bootloader exceeds 24KB with default log level
-CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
-CONFIG_BOOTLOADER_LOG_LEVEL=0
+# Bootloader: source-compiled bootloader exceeds default 24KB (0x2000-0x8000)
+# Move partition table to 0x9000 giving 28KB for bootloader
+# Temporarily enable bootloader logging for debugging
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL=3
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
 
 # Flash size (Tab5 = 16MB)
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
+# PSRAM (Tab5 = 16MB PSRAM, required for framebuffers and decode buffers)
+# 200MHz requires IDF_EXPERIMENTAL_FEATURES but 20MHz (40MB/s) is too slow
+# for 720x1280 DSI display (~110MB/s needed at 60fps)
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+
+# L2 cache: 256KB reduces PSRAM cache thrashing with DSI DMA + CPU concurrent access
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_SIZE=0x40000
+
+# Place DSI ISR handlers in IRAM to avoid Flash cache-miss stalls
+# NOTE: DMA2D_ISR_IRAM_SAFE disabled because esp_driver_jpeg's on_job_picked
+# callback is not IRAM-safe, causing "enqueue dma2d failed" errors
+CONFIG_LCD_DSI_ISR_IRAM_SAFE=y
+# CONFIG_DMA2D_ISR_IRAM_SAFE is not set
+# CONFIG_DMA2D_OPERATION_FUNC_IN_IRAM is not set
+
 # Extend interrupt WDT timeout for DMA2D serialization
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+
+# Arduino framework requires 1000Hz tick rate and autostart
+CONFIG_FREERTOS_HZ=1000
+CONFIG_AUTOSTART_ARDUINO=y
+
+# mbedTLS PSK modes: required by Arduino NetworkClientSecure (ssl_client.cpp)
+# Without this, ssl_client.cpp compiles to empty due to #if guard on
+# MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED, causing linker errors
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK=y
+
+# mbedTLS ChaCha20-Poly1305: required by MicroLink v2 Noise handshake
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+CONFIG_MBEDTLS_POLY1305_C=y
+
+# MicroLink v2 (Tailscale) settings
+CONFIG_ML_MAX_PEERS=4
+CONFIG_ML_H2_BUFFER_SIZE_KB=512
+CONFIG_ML_JSON_BUFFER_SIZE_KB=512
+CONFIG_ML_NVS_MAX_PEERS=64

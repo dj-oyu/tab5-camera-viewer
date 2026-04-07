@@ -94,4 +94,7 @@ void AppLogic::update() {
       g_ctx->recordingData().requestToggle();
     }
   }
+
+  // Yield to prevent task watchdog on CPU 1
+  vTaskDelay(pdMS_TO_TICKS(10));
 }

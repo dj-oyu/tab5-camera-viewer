@@ -6,7 +6,6 @@
 #include <esp_log.h>
 #include <esp_sntp.h>
 #include <esp_heap_caps.h>
-#include <lwip/inet.h>
 #include <time.h>
 
 extern "C" {
@@ -20,24 +19,26 @@ microlink_t *s_ml = nullptr;
 char s_vpnIpStr[16] = "";
 uint8_t s_peerCount = 0;
 
-void onConnected() {
-  Serial.println("Tailscale: VPN CONNECTED (waiting for WG handshake)");
-  if (s_ml) {
-    uint32_t ip = microlink_get_vpn_ip(s_ml);
-    microlink_vpn_ip_to_str(ip, s_vpnIpStr);
+const char *mlStateToStr(microlink_state_t state) {
+  switch (state) {
+    case ML_STATE_IDLE:         return "IDLE";
+    case ML_STATE_WIFI_WAIT:    return "WIFI_WAIT";
+    case ML_STATE_CONNECTING:   return "CONNECTING";
+    case ML_STATE_REGISTERING:  return "REGISTERING";
+    case ML_STATE_CONNECTED:    return "CONNECTED";
+    case ML_STATE_RECONNECTING: return "RECONNECTING";
+    case ML_STATE_ERROR:        return "ERROR";
+    default:                    return "UNKNOWN";
   }
-  // Don't set VPN_CONNECTED_BIT here - wait for WG handshake in main loop
 }
 
-void onDisconnected() {
-  Serial.println("Tailscale: VPN DISCONNECTED");
-  // VPN_CONNECTED_BIT is managed by the main loop based on peer status
-}
-
-void onStateChange(microlink_state_t old_state, microlink_state_t new_state) {
-  Serial.printf("Tailscale: %s -> %s\n",
-                microlink_state_to_str(old_state),
-                microlink_state_to_str(new_state));
+void onStateChange(microlink_t *ml, microlink_state_t new_state, void *) {
+  Serial.printf("Tailscale: -> %s\n", mlStateToStr(new_state));
+  if (new_state == ML_STATE_CONNECTED && ml) {
+    uint32_t ip = microlink_get_vpn_ip(ml);
+    microlink_ip_to_str(ip, s_vpnIpStr);
+    Serial.printf("Tailscale: VPN IP = %s\n", s_vpnIpStr);
+  }
 }
 
 void tailscaleTask(void *pvParameters) {
@@ -79,8 +80,8 @@ void tailscaleTask(void *pvParameters) {
   // Suppress MicroLink logs - only show errors and state transitions
   esp_log_level_set("microlink", ESP_LOG_WARN);
   esp_log_level_set("ml_wg", ESP_LOG_WARN);
-  esp_log_level_set("ml_derp", ESP_LOG_WARN);
-  esp_log_level_set("ml_conn", ESP_LOG_WARN);
+  esp_log_level_set("ml_derp", ESP_LOG_INFO);   // DEBUG: DERP receive investigation
+  esp_log_level_set("ml_conn", ESP_LOG_INFO);   // DEBUG: DERP receive investigation
   esp_log_level_set("ml_disco", ESP_LOG_INFO);   // DEBUG: NAT traversal investigation
   esp_log_level_set("ml_coord", ESP_LOG_WARN);
   esp_log_level_set("ml_stun", ESP_LOG_INFO);    // DEBUG: NAT traversal investigation
@@ -90,21 +91,16 @@ void tailscaleTask(void *pvParameters) {
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned long)esp_get_free_heap_size());
 
-  microlink_config_t config;
-  microlink_get_default_config(&config);
-
+  microlink_config_t config = {};
   config.auth_key = TAILSCALE_AUTH_KEY;
   config.device_name = "m5stack-tab5";
   config.enable_derp = true;
-  config.enable_stun = true;    // STUN enabled (DNS fallback + correct DERP server)
-  config.enable_disco = true;   // DISCO enabled (peer filter prevents non-target WG crash)
+  config.enable_stun = true;
+  config.enable_disco = true;
   config.max_peers = 4;
-  config.heartbeat_interval_ms = 25000;
-  config.target_hostname = "rdk-x5";  // Only add this peer to WG
-
-  config.on_connected = onConnected;
-  config.on_disconnected = onDisconnected;
-  config.on_state_change = onStateChange;
+#ifdef TAILSCALE_PRIORITY_PEER_IP
+  config.priority_peer_ip = microlink_parse_ip(TAILSCALE_PRIORITY_PEER_IP);
+#endif
 
   s_ml = microlink_init(&config);
   Serial.printf("TS heap after init: internal=%lu free\n",
@@ -115,12 +111,14 @@ void tailscaleTask(void *pvParameters) {
     return;
   }
 
-  esp_err_t ret = microlink_connect(s_ml);
-  Serial.printf("TS heap after connect: internal=%lu free\n",
+  microlink_set_state_callback(s_ml, onStateChange, nullptr);
+
+  esp_err_t ret = microlink_start(s_ml);
+  Serial.printf("TS heap after start: internal=%lu free\n",
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (ret != ESP_OK) {
-    Serial.printf("TailscaleTask: microlink_connect failed: %d\n", ret);
-    microlink_deinit(s_ml);
+    Serial.printf("TailscaleTask: microlink_start failed: %d\n", ret);
+    microlink_destroy(s_ml);
     s_ml = nullptr;
     vTaskDelete(nullptr);
     return;
@@ -130,83 +128,53 @@ void tailscaleTask(void *pvParameters) {
   uint32_t lastDiagMs = 0;
 
   while (1) {
-    microlink_update(s_ml);
+    // v2.x is fully async - no microlink_update() needed
 
     // Update peer count for overlay display
-    const microlink_peer_t *peers = nullptr;
-    uint8_t count = 0;
-    if (microlink_get_peers(s_ml, &peers, &count) == ESP_OK) {
-      s_peerCount = count;
-    }
+    int count = microlink_get_peer_count(s_ml);
+    s_peerCount = (uint8_t)count;
 
-    // Diagnostic log every 5 seconds
+    // Diagnostic log every 30 seconds
     uint32_t now = millis();
     if (now - lastDiagMs >= 30000) {
       microlink_state_t state = microlink_get_state(s_ml);
-      bool anyUp = microlink_any_peer_up(s_ml);
       bool connected = microlink_is_connected(s_ml);
       UBaseType_t stackHWM = uxTaskGetStackHighWaterMark(nullptr);
-      Serial.printf("TS diag: state=%s peers=%d anyUp=%d conn=%d vpnBit=%d stackHWM=%lu intHeap=%lu\n",
-                    microlink_state_to_str(state), s_peerCount, anyUp, connected,
+      Serial.printf("TS diag: state=%s peers=%d conn=%d vpnBit=%d stackHWM=%lu intHeap=%lu\n",
+                    mlStateToStr(state), count, connected,
                     vpnBitSet, (unsigned long)stackHWM,
                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-      // Per-peer NAT traversal diagnostics (target peer only to avoid serial corruption)
-      for (uint8_t i = 0; i < count; i++) {
-        const auto &p = peers[i];
-        // Only show full details for target peer
-        if (strncmp(p.hostname, "rdk-x5", 6) != 0) continue;
-        Serial.printf("  target[%d] %s: eps=%d derp=%d lat=%lums bestEp=%d lastSeen=%lums ago\n",
-                      i, p.hostname, p.endpoint_count, p.using_derp,
-                      (unsigned long)p.latency_ms, p.best_endpoint_idx,
-                      p.last_seen_ms ? (unsigned long)(now - p.last_seen_ms) : 0UL);
-        for (uint8_t ep = 0; ep < p.endpoint_count; ep++) {
-          uint32_t hip = ntohl(p.endpoints[ep].addr.ip4);
-          Serial.printf("    ep[%d] %lu.%lu.%lu.%lu:%u%s\n",
-                        ep,
-                        (unsigned long)((hip >> 24) & 0xFF),
-                        (unsigned long)((hip >> 16) & 0xFF),
-                        (unsigned long)((hip >> 8) & 0xFF),
-                        (unsigned long)(hip & 0xFF),
-                        p.endpoints[ep].port,
-                        p.endpoints[ep].is_derp ? " (DERP)" : "");
+      // Per-peer diagnostics
+      microlink_peer_info_t peer;
+      for (int i = 0; i < count; i++) {
+        if (microlink_get_peer_info(s_ml, i, &peer) == ESP_OK) {
+          Serial.printf("  peer[%d] %s: online=%d direct=%d\n",
+                        i, peer.hostname, peer.online, peer.direct_path);
         }
-      }
-
-      // STUN / NAT diagnostics
-      microlink_stun_info_t stun;
-      if (microlink_get_stun_info(s_ml, &stun) == ESP_OK && stun.public_ip != 0) {
-        static const char *nat_names[] = {"unknown", "none", "cone", "symmetric"};
-        static const char *alloc_names[] = {"unknown", "seq", "random"};
-        const char *nat_str = (stun.nat_type < 4) ? nat_names[stun.nat_type] : "?";
-        const char *alloc_str = (stun.alloc_type < 3) ? alloc_names[stun.alloc_type] : "?";
-        Serial.printf("  STUN: %lu.%lu.%lu.%lu:%u alt:%u delta=%d NAT=%s alloc=%s\n",
-                      (unsigned long)((stun.public_ip >> 24) & 0xFF),
-                      (unsigned long)((stun.public_ip >> 16) & 0xFF),
-                      (unsigned long)((stun.public_ip >> 8) & 0xFF),
-                      (unsigned long)(stun.public_ip & 0xFF),
-                      stun.public_port, stun.public_port_alt,
-                      stun.port_delta, nat_str, alloc_str);
-      }
-      microlink_stats_t stats;
-      if (microlink_get_stats(s_ml, &stats) == ESP_OK) {
-        Serial.printf("  stats: derp_relayed=%lu direct=%lu\n",
-                      (unsigned long)stats.derp_packets_relayed,
-                      (unsigned long)stats.direct_packets_sent);
       }
 
       lastDiagMs = now;
     }
 
-    // Signal VPN ready only after at least one WG handshake completes
-    bool peerUp = microlink_any_peer_up(s_ml);
-    if (!vpnBitSet && peerUp) {
+    // Signal VPN ready when any peer has completed WG handshake
+    bool anyOnline = false;
+    {
+      microlink_peer_info_t peer;
+      for (int i = 0; i < count; i++) {
+        if (microlink_get_peer_info(s_ml, i, &peer) == ESP_OK && peer.online) {
+          anyOnline = true;
+          break;
+        }
+      }
+    }
+    if (!vpnBitSet && anyOnline) {
       Serial.println("TailscaleTask: WG tunnel active, signaling VPN ready");
       if (s_vpnEventGroup) {
         xEventGroupSetBits(s_vpnEventGroup, VPN_CONNECTED_BIT);
       }
       vpnBitSet = true;
-    } else if (vpnBitSet && !peerUp) {
+    } else if (vpnBitSet && !anyOnline) {
       Serial.println("TailscaleTask: WG tunnel lost");
       if (s_vpnEventGroup) {
         xEventGroupClearBits(s_vpnEventGroup, VPN_CONNECTED_BIT);
@@ -214,8 +182,7 @@ void tailscaleTask(void *pvParameters) {
       vpnBitSet = false;
     }
 
-    // Faster polling when VPN active (DERP streaming needs low latency)
-    vTaskDelay(pdMS_TO_TICKS(vpnBitSet ? 2 : 10));
+    vTaskDelay(pdMS_TO_TICKS(vpnBitSet ? 10 : 50));
   }
 #else
   Serial.println("TailscaleTask: TAILSCALE_AUTH_KEY not defined, task idle");
