@@ -7,8 +7,8 @@ constexpr int STACK_DEPTH_FETCH  = 12288;
 constexpr int STACK_DEPTH_DECODE = 8192;
 constexpr int BITSTREAM_PAD = 64;
 
-constexpr uint32_t STREAM_WIDTH = 640;
-constexpr uint32_t STREAM_HEIGHT = 480;
+constexpr uint32_t STREAM_WIDTH = 768;
+constexpr uint32_t STREAM_HEIGHT = 432;
 
 constexpr uint32_t PANEL_WIDTH = 720;
 constexpr uint32_t PANEL_HEIGHT = 1280;
@@ -44,8 +44,8 @@ constexpr float FPS_THROTTLE_OFF = 26.0f;
 
 // Overlay configuration (for landscape viewing)
 constexpr uint32_t OVERLAY_BAR_SIZE = 160;    // 黒帯サイズ (top/bottom in framebuffer)
-constexpr uint32_t VIDEO_Y_OFFSET = 160;      // 映像の開始Y座標
-constexpr uint32_t VIDEO_HEIGHT = 960;        // 映像の高さ (480 * 1.5 * rotated)
+constexpr uint32_t VIDEO_Y_OFFSET = OVERLAY_BAR_SIZE; // 映像の開始Y座標 (バー直後)
+constexpr uint32_t VIDEO_HEIGHT = 960;        // 映像の高さ (rotated 768*1.25)
 
 // Detection API configuration
 constexpr uint32_t DETECTION_TIMEOUT_MS = 30000;      // HTTP connect/response timeout

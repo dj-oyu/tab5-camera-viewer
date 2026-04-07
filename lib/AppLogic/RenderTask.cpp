@@ -16,23 +16,27 @@ namespace
 
   ScalePlan computeScalePlan()
   {
-    constexpr float scale_x = static_cast<float>(PANEL_WIDTH) / STREAM_WIDTH;
-    constexpr float scale_y = static_cast<float>(PANEL_HEIGHT) / STREAM_HEIGHT;
-    constexpr float base_scale = scale_x < scale_y ? scale_x : scale_y;
+    // Video area dimensions (excludes overlay bars)
+    constexpr uint32_t VIEW_W = PANEL_WIDTH;
+    constexpr uint32_t VIEW_H = VIDEO_HEIGHT;
 
     constexpr bool panel_is_portrait = PANEL_HEIGHT > PANEL_WIDTH;
     constexpr bool stream_is_landscape = STREAM_WIDTH > STREAM_HEIGHT;
 
     if (panel_is_portrait && stream_is_landscape)
     {
+      // Rotate 90° then fit into video area
       constexpr float rot_scale_x =
-          static_cast<float>(PANEL_WIDTH) / STREAM_HEIGHT;
+          static_cast<float>(VIEW_W) / STREAM_HEIGHT;
       constexpr float rot_scale_y =
-          static_cast<float>(PANEL_HEIGHT) / STREAM_WIDTH;
+          static_cast<float>(VIEW_H) / STREAM_WIDTH;
       float scale = rot_scale_x < rot_scale_y ? rot_scale_x : rot_scale_y;
       return {PPA_SRM_ROTATION_ANGLE_90, scale};
     }
 
+    constexpr float scale_x = static_cast<float>(VIEW_W) / STREAM_WIDTH;
+    constexpr float scale_y = static_cast<float>(VIEW_H) / STREAM_HEIGHT;
+    constexpr float base_scale = scale_x < scale_y ? scale_x : scale_y;
     return {PPA_SRM_ROTATION_ANGLE_0, base_scale};
   }
 

@@ -80,11 +80,13 @@ void tailscaleTask(void *pvParameters) {
   // Suppress MicroLink logs - only show errors and state transitions
   esp_log_level_set("microlink", ESP_LOG_WARN);
   esp_log_level_set("ml_wg", ESP_LOG_WARN);
-  esp_log_level_set("ml_derp", ESP_LOG_INFO);   // DEBUG: DERP receive investigation
-  esp_log_level_set("ml_conn", ESP_LOG_INFO);   // DEBUG: DERP receive investigation
-  esp_log_level_set("ml_disco", ESP_LOG_INFO);   // DEBUG: NAT traversal investigation
+  esp_log_level_set("ml_wg_mgr", ESP_LOG_WARN);
+  esp_log_level_set("ml_net_io", ESP_LOG_WARN);
+  esp_log_level_set("ml_derp", ESP_LOG_WARN);
+  esp_log_level_set("ml_conn", ESP_LOG_WARN);
+  esp_log_level_set("ml_disco", ESP_LOG_WARN);
   esp_log_level_set("ml_coord", ESP_LOG_WARN);
-  esp_log_level_set("ml_stun", ESP_LOG_INFO);    // DEBUG: NAT traversal investigation
+  esp_log_level_set("ml_stun", ESP_LOG_WARN);
 
 #ifdef TAILSCALE_AUTH_KEY
   Serial.printf("TS heap: internal=%lu free, total=%lu free\n",

@@ -5,6 +5,9 @@ CONFIG_LWIP_TCP_WND_DEFAULT=10240
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=10240
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
 
+# tcpip_thread stack: WireGuard decrypt runs in tcpip context (ChaCha20+Poly1305)
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=16384
+
 # Allocate WiFi/lwIP buffers in SPIRAM to preserve internal SRAM for SDIO/queues
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 

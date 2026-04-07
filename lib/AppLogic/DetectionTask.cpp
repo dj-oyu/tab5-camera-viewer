@@ -206,6 +206,6 @@ void detectionTask(void *pvParameters) {
 
 void DetectionTask::start(PipelineContext &ctx, UBaseType_t priority,
                           BaseType_t core) {
-  xTaskCreatePinnedToCore(detectionTask, "Detection", 8192, &ctx, priority,
+  xTaskCreatePinnedToCore(detectionTask, "Detection", 12288, &ctx, priority,
                           nullptr, core);
 }

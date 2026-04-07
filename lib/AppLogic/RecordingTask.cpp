@@ -285,6 +285,6 @@ void recordingTask(void *pvParameters) {
 
 void RecordingTask::start(PipelineContext &ctx, UBaseType_t priority,
                           BaseType_t core) {
-  xTaskCreatePinnedToCore(recordingTask, "Recording", 8192, &ctx, priority,
+  xTaskCreatePinnedToCore(recordingTask, "Recording", 12288, &ctx, priority,
                           nullptr, core);
 }
