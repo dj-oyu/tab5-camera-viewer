@@ -38,7 +38,7 @@ void AppLogic::begin() {
   cfg.output_power = true;
   M5.begin(cfg);
 
-  Serial.println("AppLogic v68: SPSC ring, merged pipeline, sema signaling");
+  Serial.println("AppLogic v70: SPSC ring, decode/PPA overlap");
   Serial.printf("Panel: %dx%d\n", PANEL_WIDTH, PANEL_HEIGHT);
 
   if (!PPAPipeline::begin()) {
