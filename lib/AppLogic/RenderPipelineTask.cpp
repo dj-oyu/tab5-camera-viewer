@@ -109,14 +109,16 @@ namespace
         plan.scale, plan.scale);
 
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    uint8_t *decode_buf = ctx->decodeBuf();
     uint16_t *videoBuffer = panel_fb + VIDEO_Y_OFFSET * PANEL_WIDTH;
 
-    Serial.println("RenderPipeline: Initialized (SPSC ring, JPEG→PPA→Overlay)");
+    Serial.println("RenderPipeline: Initialized (SPSC ring, decode/PPA overlap)");
 
     PipelinePerfStats perf;
     uint32_t perf_window_start = millis();
     float current_render_fps = -1.0f;
+    int decode_buf_idx = 0;      // Current decode buffer (ping-pong)
+    bool ppa_pending = false;    // PPA operation in flight
+    int64_t ppa_start = 0;
 
     auto flushPerf = [&](uint32_t now)
     {
@@ -148,16 +150,48 @@ namespace
 
     while (1)
     {
+      // --- Complete previous PPA if pending ---
+      if (ppa_pending)
+      {
+        if (!ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
+        {
+          perf.ppa_timeouts++;
+        }
+        else
+        {
+          perf.ppa_us +=
+              static_cast<uint64_t>(esp_timer_get_time() - ppa_start);
+        }
+        ppa_pending = false;
+
+        // Overlay after PPA completes
+        int64_t overlay_start = esp_timer_get_time();
+        OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
+                                ctx->recordingData(), ctx->batteryData(),
+                                panel_fb, current_render_fps);
+        perf.overlay_us +=
+            static_cast<uint64_t>(esp_timer_get_time() - overlay_start);
+
+        perf.frames++;
+
+        uint32_t now = millis();
+        if (perf.frames >= PERF_LOG_WINDOW_FRAMES ||
+            (now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
+        {
+          flushPerf(now);
+        }
+      }
+
       // --- Check SPSC ring for available frames ---
       uint32_t r = ctx->ringRead().load(std::memory_order_relaxed);
       uint32_t w = ctx->ringWrite().load(std::memory_order_acquire);
 
       if (r >= w)
       {
-        // Ring empty — wait for Fetch to produce a frame
+        // Ring empty — wait for Fetch
         xSemaphoreTake(ctx->frameReadySema(), pdMS_TO_TICKS(1000));
 
-        // Render overlay even when idle (battery, WiFi, VPN status)
+        // Render overlay even when idle
         OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
                                 ctx->recordingData(), ctx->batteryData(),
                                 panel_fb, current_render_fps);
@@ -181,7 +215,7 @@ namespace
 
       FrameSlot *slot = ctx->ringSlot(r);
 
-      // --- JPEG validation (from DecodeTask) ---
+      // --- JPEG validation ---
       if (slot->len < 4 || slot->buf[0] != 0xFF || slot->buf[1] != 0xD8)
       {
         perf.decode_errors++;
@@ -198,16 +232,17 @@ namespace
         continue;
       }
 
-      // --- JPEG HW Decode ---
+      // --- JPEG HW Decode (into current decode buffer) ---
+      uint8_t *cur_decode_buf = ctx->decodeBuf(decode_buf_idx);
       uint32_t out_size = 0;
       int64_t decode_start = esp_timer_get_time();
       esp_err_t ret = jpeg_decoder_process(
           decoder, &dec_cfg, slot->buf, slot->aligned_len,
-          decode_buf, DECODE_BUF_SIZE, &out_size);
+          cur_decode_buf, DECODE_BUF_SIZE, &out_size);
       perf.decode_us +=
           static_cast<uint64_t>(esp_timer_get_time() - decode_start);
 
-      // Release ring slot ASAP (Fetch can reuse buffer immediately)
+      // Release ring slot ASAP
       ctx->ringRead().store(r + 1, std::memory_order_release);
       xTaskNotifyGive(ctx->fetchTaskHandle());
 
@@ -222,44 +257,25 @@ namespace
         continue;
       }
 
-      // --- PPA Scale/Rotate → Framebuffer ---
-      int64_t ppa_start = esp_timer_get_time();
+      // --- PPA Scale/Rotate (async — don't wait, loop back to complete next iteration) ---
+      ppa_start = esp_timer_get_time();
 
       bool ppa_ok = PPAPipeline::submit(
-          ppa_config, decode_buf,
+          ppa_config, cur_decode_buf,
           reinterpret_cast<uint8_t *>(videoBuffer), self);
 
-      if (!ppa_ok || !ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(120)))
+      if (!ppa_ok)
       {
         perf.ppa_timeouts++;
-        uint32_t now = millis();
-        if (perf.frames >= PERF_LOG_WINDOW_FRAMES ||
-            (now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
-        {
-          flushPerf(now);
-        }
         continue;
       }
 
-      perf.ppa_us +=
-          static_cast<uint64_t>(esp_timer_get_time() - ppa_start);
+      ppa_pending = true;
+      decode_buf_idx ^= 1;  // Swap to other decode buffer for next frame
 
-      // --- Overlay ---
-      int64_t overlay_start = esp_timer_get_time();
-      OverlayRenderer::render(ctx->detectionData(), ctx->connectionData(),
-                              ctx->recordingData(), ctx->batteryData(),
-                              panel_fb, current_render_fps);
-      perf.overlay_us +=
-          static_cast<uint64_t>(esp_timer_get_time() - overlay_start);
-
-      perf.frames++;
-
-      uint32_t now = millis();
-      if (perf.frames >= PERF_LOG_WINDOW_FRAMES ||
-          (now - perf_window_start) >= PERF_LOG_INTERVAL_MS)
-      {
-        flushPerf(now);
-      }
+      // Don't wait for PPA — loop back immediately.
+      // Next iteration will complete PPA, then decode the next frame while PPA runs.
+      // This overlaps decode(N+1) with PPA(N).
     }
   }
 } // namespace

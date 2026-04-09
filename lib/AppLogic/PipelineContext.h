@@ -50,8 +50,8 @@ public:
   // Signaling (semaphore-based, ABI-safe with precompiled Arduino libs)
   SemaphoreHandle_t frameReadySema() const { return frame_ready_sema_; }
 
-  // Single decode buffer
-  uint8_t *decodeBuf() { return reinterpret_cast<uint8_t *>(decode_buf_); }
+  // Double decode buffer (overlap decode N+1 with PPA N)
+  uint8_t *decodeBuf(int idx) { return reinterpret_cast<uint8_t *>(decode_bufs_[idx]); }
 
   // Display
   esp_lcd_panel_handle_t panelHandle() const { return panel_handle_; }
@@ -81,7 +81,7 @@ private:
   TaskHandle_t render_pipeline_task_ = nullptr;
 
   SemaphoreHandle_t frame_ready_sema_ = nullptr;
-  uint16_t *decode_buf_ = nullptr;
+  uint16_t *decode_bufs_[DECODE_BUF_COUNT] = {};
   uint8_t *linear_bufs_[RING_DEPTH] = {};
 
   esp_lcd_panel_handle_t panel_handle_ = nullptr;

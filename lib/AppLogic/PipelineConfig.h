@@ -13,6 +13,7 @@ constexpr uint32_t PANEL_WIDTH = 720;
 constexpr uint32_t PANEL_HEIGHT = 1280;
 
 constexpr uint32_t DECODE_BUF_SIZE = STREAM_WIDTH * STREAM_HEIGHT * 2; // RGB565 at stream resolution
+constexpr uint32_t DECODE_BUF_COUNT = 2; // Double-buffer for decode/PPA overlap
 
 constexpr uint32_t LINEAR_BUF_SIZE = 83558;   // 82KB (max 66KB + 25%margin)
 constexpr uint32_t RING_DEPTH = 3;            // SPSC ring depth (fetch/decode pipeline)

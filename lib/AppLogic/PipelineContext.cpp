@@ -77,12 +77,14 @@ bool PipelineContext::init() {
     frame_slots_[i].buf = linear_bufs_[i];
   }
 
-  decode_buf_ = static_cast<uint16_t *>(heap_caps_aligned_alloc(
-      64, DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  Serial.printf("Decode buffer: %p (size=%u)\n", decode_buf_, DECODE_BUF_SIZE);
-  if (!decode_buf_) {
-    Serial.println("FATAL: Failed to allocate decode buffer!");
-    while (1) { vTaskDelay(1000); }
+  for (int i = 0; i < DECODE_BUF_COUNT; ++i) {
+    decode_bufs_[i] = static_cast<uint16_t *>(heap_caps_aligned_alloc(
+        64, DECODE_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    Serial.printf("Decode buffer[%d]: %p (size=%u)\n", i, decode_bufs_[i], DECODE_BUF_SIZE);
+    if (!decode_bufs_[i]) {
+      Serial.println("FATAL: Failed to allocate decode buffer!");
+      while (1) { vTaskDelay(1000); }
+    }
   }
 
   if (!detection_data_.init()) { Serial.println("Failed to init DetectionData"); return false; }
