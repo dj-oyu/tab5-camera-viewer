@@ -5,23 +5,21 @@
 #include "DetectionData.h"
 #include "RecordingData.h"
 #include "PipelineConfig.h"
+#include <atomic>
 #include <cstdint>
-#include <driver/jpeg_decode.h>
-#include <esp_cache.h>
 #include <esp_lcd_mipi_dsi.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_types.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-struct FrameData
+/// SPSC ring slot: Fetch writes metadata, RenderPipeline reads.
+struct FrameSlot
 {
-  uint8_t *buf;
-  size_t len;
-  size_t aligned_len;
-  bool is_linear;
+  uint8_t *buf = nullptr;
+  size_t len = 0;
+  size_t aligned_len = 0;
 };
 
 struct SideLoadProfile
@@ -38,32 +36,34 @@ class PipelineContext
 public:
   [[nodiscard]] bool init();
 
-  QueueHandle_t frameQueue() const { return frame_queue_; }
-  QueueHandle_t linearFreeQueue() const { return linear_free_queue_; }
+  // SPSC ring
+  FrameSlot *ringSlot(uint32_t index) { return &frame_slots_[index % RING_DEPTH]; }
+  std::atomic<uint32_t> &ringWrite() { return ring_write_; }
+  std::atomic<uint32_t> &ringRead() { return ring_read_; }
 
-  TaskHandle_t renderTaskHandle() const { return render_task_handle_; }
-  void setRenderTaskHandle(TaskHandle_t h) { render_task_handle_ = h; }
-  SemaphoreHandle_t dma2dGate() const { return dma2d_gate_; }
+  // Task handles
+  void setFetchTaskHandle(TaskHandle_t h) { fetch_task_ = h; }
+  void setRenderPipelineTaskHandle(TaskHandle_t h) { render_pipeline_task_ = h; }
+  TaskHandle_t fetchTaskHandle() const { return fetch_task_; }
+  TaskHandle_t renderPipelineTaskHandle() const { return render_pipeline_task_; }
 
+  // Signaling (semaphore-based, ABI-safe with precompiled Arduino libs)
+  SemaphoreHandle_t frameReadySema() const { return frame_ready_sema_; }
+
+  // Single decode buffer
+  uint8_t *decodeBuf() { return reinterpret_cast<uint8_t *>(decode_buf_); }
+
+  // Display
   esp_lcd_panel_handle_t panelHandle() const { return panel_handle_; }
   void setPanelHandle(esp_lcd_panel_handle_t handle) { panel_handle_ = handle; }
-
   uint16_t *panelFramebuffer() const { return panel_fb_; }
   void setPanelFramebuffer(uint16_t *fb) { panel_fb_ = fb; }
 
-  // Decoded frame double-buffer API (replaces decodedFrameQueue)
-  uint8_t *acquireDecodeBuf(TickType_t timeout = portMAX_DELAY);
-  void commitDecodedFrame();
-  void discardDecodeBuf();
-  uint8_t *waitDecodedFrame(TickType_t timeout);
-  void releaseDecodedFrame();
-  int decodedFramesPending() const;
-
-  [[nodiscard]] bool acquireLinear(uint8_t *&out_buf);
-  void releaseLinear(uint8_t *buf);
+  // Performance
   void updateRenderFps(float fps, uint32_t now_ms);
   [[nodiscard]] SideLoadProfile sideLoadProfile() const;
 
+  // Shared data
   DetectionData &detectionData() { return detection_data_; }
   const DetectionData &detectionData() const { return detection_data_; }
   ConnectionData &connectionData() { return connection_data_; }
@@ -74,29 +74,24 @@ public:
   const BatteryData &batteryData() const { return battery_data_; }
 
 private:
-  QueueHandle_t frame_queue_ = nullptr;
-  QueueHandle_t linear_free_queue_ = nullptr;
-  TaskHandle_t render_task_handle_ = nullptr;
-  SemaphoreHandle_t dma2d_gate_ = nullptr;
+  FrameSlot frame_slots_[RING_DEPTH] = {};
+  std::atomic<uint32_t> ring_write_{0};
+  std::atomic<uint32_t> ring_read_{0};
+  TaskHandle_t fetch_task_ = nullptr;
+  TaskHandle_t render_pipeline_task_ = nullptr;
+
+  SemaphoreHandle_t frame_ready_sema_ = nullptr;
+  uint16_t *decode_buf_ = nullptr;
+  uint8_t *linear_bufs_[RING_DEPTH] = {};
+
   esp_lcd_panel_handle_t panel_handle_ = nullptr;
   uint16_t *panel_fb_ = nullptr;
 
-  uint8_t *decodeBufferBytes(int idx)
-  {
-    return reinterpret_cast<uint8_t *>(decode_bufs_[idx]);
-  }
-
-  uint16_t *decode_bufs_[DECODE_BUF_COUNT] = {};
-  SemaphoreHandle_t decode_slot_sema_ = nullptr;
-  SemaphoreHandle_t decoded_frame_sema_ = nullptr;
-  int decode_write_idx_ = 0;
-  int decode_read_idx_ = 0;
-
-  uint8_t *linear_bufs_[LINEAR_BUF_COUNT] = {};
   SemaphoreHandle_t perf_mutex_ = nullptr;
   SideLoadProfile side_profile_ = {};
   uint32_t below_fps_since_ms_ = 0;
   uint32_t above_fps_since_ms_ = 0;
+
   DetectionData detection_data_;
   ConnectionData connection_data_;
   RecordingData recording_data_;
