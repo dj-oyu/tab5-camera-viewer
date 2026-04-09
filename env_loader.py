@@ -54,6 +54,11 @@ with open(override_header, "w") as f:
 #undef CONFIG_LWIP_TCP_RECVMBOX_SIZE
 #define CONFIG_LWIP_TCP_RECVMBOX_SIZE 32
 
+/* tcpip_thread stack: WireGuard decrypt (ChaCha20+Poly1305) runs in tcpip context.
+ * Default 3072 causes stack overflow with refc crypto implementation. */
+#undef CONFIG_LWIP_TCPIP_TASK_STACK_SIZE
+#define CONFIG_LWIP_TCPIP_TASK_STACK_SIZE 16384
+
 /* Enable SPIRAM allocation for WiFi/lwIP buffers to reduce internal SRAM pressure.
  * This matches the Hybrid Compile config that achieved 30fps. */
 #ifndef CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP

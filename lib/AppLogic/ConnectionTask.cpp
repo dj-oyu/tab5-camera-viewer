@@ -137,6 +137,6 @@ void connectionTask(void *pvParameters) {
 
 void ConnectionTask::start(PipelineContext &ctx, UBaseType_t priority,
                            BaseType_t core) {
-  xTaskCreatePinnedToCore(connectionTask, "Connection", 8192, &ctx, priority,
+  xTaskCreatePinnedToCore(connectionTask, "Connection", 12288, &ctx, priority,
                           nullptr, core);
 }
