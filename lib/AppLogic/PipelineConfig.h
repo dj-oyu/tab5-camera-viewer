@@ -29,7 +29,7 @@ constexpr bool VERIFY_FETCH_ONLY_MODE = false;
 constexpr bool VERIFY_WIFI_DIAG_LOG = false;
 
 // Performance logging / control
-constexpr bool VERBOSE_PERF_LOG = false;
+constexpr bool VERBOSE_PERF_LOG = true;
 constexpr uint32_t PERF_LOG_WINDOW_FRAMES = 60;
 constexpr uint32_t PERF_LOG_INTERVAL_MS = 2000;
 constexpr float FPS_THROTTLE_ON = 24.0f;
